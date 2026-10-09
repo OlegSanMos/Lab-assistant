@@ -1,0 +1,16 @@
+flowchart TB
+    Q["Запрос студента"] --> D{"Диспетчер router_chain"}
+    D -->|research| RA["Агент-исследователь"]
+    D -->|data| DA["Агент-аналитик данных"]
+    D -->|exam| EX["Экзаменатор: quiz_chain, grade_chain"]
+    D -->|"manual, flowchart, chat"| CH["Цепочки LCEL"]
+    RA --- T1["search_lab_manuals, web_search, wikipedia_search, calculator"]
+    DA --- T2["describe_data, column_statistics, fit_dependency, add_computed_column, calculator"]
+    T1 --> LOOP
+    T2 --> LOOP
+    subgraph LOOP["Цикл агента LangGraph"]
+        direction LR
+        LM["LLM"] -->|tool_calls| TN["Инструменты"]
+        TN -->|результат| LM
+    end
+    LOOP --> OUT["Ответ, шаги агента, графики"]

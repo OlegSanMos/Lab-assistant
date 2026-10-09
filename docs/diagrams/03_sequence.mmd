@@ -1,0 +1,23 @@
+sequenceDiagram
+    actor S as Студент
+    participant UI as Интерфейс
+    participant A as Оркестратор
+    participant R as Диспетчер
+    participant X as Исполнитель
+    participant L as LLM
+    S->>UI: вопрос, голос,<br/>фото или файл
+    UI->>A: ingest():<br/>речь в текст
+    A->>A: apply_context():<br/>окно истории
+    A->>R: router_chain
+    R->>L: классификация
+    L-->>R: маршрут
+    A->>X: вопрос, история,<br/>резюме
+    loop агент или поток токенов
+        X->>L: промпт
+        L-->>X: инструмент<br/>или текст
+    end
+    X-->>UI: ответ, шаги,<br/>графики, источники
+    A->>A: сохранить реплики
+    UI->>UI: синтез речи
+    A->>L: summary_chain
+    UI-->>S: ответ, изображения,<br/>аудио

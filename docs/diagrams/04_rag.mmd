@@ -1,0 +1,17 @@
+flowchart TB
+    F["Методички: PDF, DOCX, TXT, MD"] --> SP["RecursiveCharacterTextSplitter: 900 символов, перекрытие 150"]
+    SP --> HD["Заголовок работы в каждом фрагменте"]
+    HD --> BM["Индекс BM25 со стеммингом"]
+    HD --> VS["Эмбеддинги в InMemoryVectorStore"]
+    Q["Вопрос студента"] --> R1["Ранги BM25"]
+    Q --> R2["Ранги векторного поиска"]
+    Q --> R3["Фильтр по номеру работы"]
+    BM --> R1
+    VS --> R2
+    R1 --> RRF["Объединение рангов RRF, k лучших фрагментов"]
+    R2 --> RRF
+    R3 --> RRF
+    RRF --> PR["Промпт: роль, резюме, фрагменты, история, вопрос"]
+    PR --> LLM["LLM"] --> ANS["Ответ со ссылками на источники"]
+    classDef index fill:#e6f4ea,stroke:#1a7f37
+    class F,SP,HD,BM,VS index

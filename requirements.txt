@@ -1,0 +1,39 @@
+# LangChain: цепочки (LCEL), агенты (create_agent на LangGraph), интеграции с LLM
+langchain>=1.0,<2
+langchain-core>=1.0,<2
+langchain-openai>=1.0,<2
+langchain-ollama>=1.0,<2
+langchain-text-splitters>=1.0,<2
+langgraph>=1.0,<2
+
+# Веб-интерфейс
+gradio>=6.0,<7
+
+# База знаний (RAG): чтение документов и лексический поиск
+pypdf>=5.0
+python-docx>=1.1
+rank-bm25>=0.2.2
+snowballstemmer>=2.2
+
+# Обработка экспериментальных данных и графики
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+openpyxl>=3.1
+pillow>=10.0
+
+# Внешние данные из интернета
+ddgs>=9.0
+requests>=2.31
+
+# Речь: распознавание (OpenAI Whisper API или локальная модель faster-whisper) и синтез
+openai>=1.40
+faster-whisper>=1.0
+edge-tts>=7.0
+gTTS
+
+# Настройки из файла .env
+python-dotenv>=1.0
+
+# Проверка HTTPS-сертификатов по хранилищу ОС (корпоративные сети, прокси)
+truststore>=0.9
