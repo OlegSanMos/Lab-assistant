@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx"}
+TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xlsm", ".xls", ".ods"}
 
 _T_DF = list(range(1, 21)) + [25, 30, 40, 60, 120]
 STUDENT_T = {
@@ -125,7 +125,9 @@ def clean_column_name(name: object) -> str:
 
 def load_table(path: str | Path) -> pd.DataFrame:
     path = Path(path)
-    if path.suffix.lower() == ".xlsx":
+    if path.suffix.lower() in (".xls", ".ods"):
+        raise ValueError("таблицы в этом формате не читаются: сохраните ее как XLSX или CSV")
+    if path.suffix.lower() in (".xlsx", ".xlsm"):
         df = pd.read_excel(path)
     else:
         raw = path.read_bytes()

@@ -40,8 +40,15 @@ def versions() -> str:
 
 def check_tts(voice: str, out_dir: Path) -> Path | None:
     working = None
-    for name, engine, ext in speech.tts_engines():
-        path = out_dir / f"check_{name}.{ext}"
+    male = voice in speech.MALE_VOICES
+    for name, engine, ext in speech.tts_engines(voice):
+        if name == "piper":
+            if not speech.piper_cached(male):
+                print(f"  ... скачивается голос Piper (около {speech.PIPER_MB} МБ, один раз)")
+            loader = speech.preload_piper(male)
+            if loader is not None:
+                loader.join()
+        path = out_dir / f"check_{'male' if male else 'female'}_{name}.{ext}"
         started = time.monotonic()
         error = speech.try_engine(engine, PHRASE, voice, path)
         took = time.monotonic() - started
@@ -56,8 +63,11 @@ def main() -> None:
     use_system_certificates()
     settings = Settings.from_env()
     out_dir = Path(tempfile.mkdtemp(prefix="labmentor_speech_"))
-    print("Озвучивание:")
-    audio = check_tts(settings.tts_voice, out_dir)
+    found = []
+    for label, voice in speech.VOICES.items():
+        print(f"Озвучивание, {label.lower()} голос:")
+        found.append(check_tts(voice, out_dir))
+    audio = next((path for path in found if path), None)
     print(f"\nРаспознавание: {' -> '.join(speech.stt_engines(settings))} ({versions()})")
     ok = audio is not None
     if "local" in speech.stt_engines(settings):

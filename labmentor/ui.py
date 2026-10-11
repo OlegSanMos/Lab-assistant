@@ -5,14 +5,26 @@ from pathlib import Path
 import gradio as gr
 import pandas as pd
 
-from .assistant import MODES, LabAssistant, Options, Reply, Session
+from .assistant import (
+    IMAGE_EXTENSIONS,
+    MODES,
+    SUMMARY_REQUEST,
+    LabAssistant,
+    Options,
+    Reply,
+    Session,
+)
 from .config import DEFAULT_MODELS, PROJECT_DIR, Settings
 from .data_analysis import add_column, parse_column_spec
 from .formulas import LATEX_DELIMITERS, prettify_math
+from .knowledge import DOC_EXTENSIONS
 from .llm import PROVIDERS
 from .speech import (
     AUDIO_EXTENSIONS,
+    MALE_VOICES,
     VOICES,
+    piper_loading,
+    preload_piper,
     stt_loading,
     stt_status,
     tts_status,
@@ -35,8 +47,7 @@ EXAMPLES = [
     {"text": "Найди в интернете типичное напряжение Эрли транзистора и сравни с методичкой"},
     {"text": "Проверь меня: задай вопросы для защиты работы 1.2"},
 ]
-INPUT_TYPES = [".pdf", ".docx", ".txt", ".md", ".csv", ".tsv", ".xlsx", "image", "audio"]
-INPUT_HINT = "Задайте вопрос или прикрепите файл: таблицу, фото, методичку, аудио"
+INPUT_HINT = "Задайте вопрос или прикрепите файл: методичку, таблицу, фото, аудио"
 VOICE_HINT = (
     "Запишите вопрос: после остановки записи он отправится сам, а ответ прозвучит автоматически."
 )
@@ -121,10 +132,12 @@ def render(reply: Reply) -> list[dict]:
 def context_outputs(session: Session) -> tuple[str, str]:
     st, plan = session.memory.stats(), session.context_plan
     percent = min(100, round(st["tokens"] / max(st["limit"], 1) * 100))
+    names = ", ".join(f.name for f in session.files) or "нет"
     info = (
         f"**История:** {st['tokens']} из {st['limit']} токенов ({percent} %)  \n"
         f"**Сообщений в окне:** {st['in_window']} из {st['total']}  \n"
-        f"**Резюме:** {st['summary_words']} слов"
+        f"**Резюме:** {st['summary_words']} слов  \n"
+        f"**Файлы в памяти диалога:** {names}"
     )
     if plan:
         info += (
@@ -204,10 +217,11 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 )
                 kb_upload = gr.File(
                     file_count="multiple",
-                    file_types=[".pdf", ".docx", ".txt", ".md"],
-                    label="Добавить методические указания",
+                    file_types=sorted(DOC_EXTENSIONS),
+                    label="Добавить методические указания и другие документы",
                 )
                 kb_info = gr.Markdown(assistant.kb.describe())
+                forget_btn = gr.Button("🗑 Забыть загруженные файлы", size="sm")
             with gr.Accordion("🎙️ Голос, интернет, защита", open=False):
                 speak = gr.Checkbox(False, label="Озвучивать и ответы на вопросы, заданные текстом")
                 voices = list(VOICES.items())
@@ -232,7 +246,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 chat_input = gr.MultimodalTextbox(
                     placeholder=INPUT_HINT,
                     sources=["upload"],
-                    file_types=INPUT_TYPES,
+                    file_types=None,
                     file_count="multiple",
                     show_label=False,
                 )
@@ -317,25 +331,33 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             assistant.apply_context(sess, options)
             history = list(history or [])
             files = (message or {}).get("files") or []
-            if any(Path(f).suffix.lower() in AUDIO_EXTENSIONS for f in files):
-                listening = {"role": "assistant", "content": "🎤 Распознаю речь..."}
+            attached = [
+                Path(f).name for f in files if Path(f).suffix.lower() not in AUDIO_EXTENSIONS
+            ]
+            if files:
+                status = (
+                    "📎 Читаю файлы: " + ", ".join(attached) if attached else "🎤 Распознаю речь"
+                )
                 yield (
-                    [*history, listening],
+                    [*history, {"role": "assistant", "content": f"{status}..."}],
                     "busy",
                     fresh_audio(None),
                     *context_outputs(sess),
                     *[gr.skip()] * 4,
                 )
             text = ((message or {}).get("text") or "").strip()
-            got = assistant.ingest(sess, files)
+            got = assistant.ingest(sess, files, options)
             tables = (
                 table_updates(sess)
                 if any(n.startswith("Загружена таблица") for n in got.notes)
                 else [gr.skip()] * 4
             )
             question = f"{text} {got.speech}".strip()
-            if got.image:
-                history.append({"role": "user", "content": {"path": got.image}})
+            for image in got.images:
+                history.append({"role": "user", "content": {"path": image}})
+            for name in attached:
+                if Path(name).suffix.lower() not in IMAGE_EXTENSIONS:
+                    history.append({"role": "user", "content": f"📎 {name}"})
             if text:
                 history.append({"role": "user", "content": text})
             if got.speech:
@@ -350,7 +372,9 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 )
             if got.speech_error:
                 history.append({"role": "assistant", "content": f"⚠️ {got.speech_error}"})
-            if not question and not got.image:
+            if not question and got.documents:
+                question = SUMMARY_REQUEST.format(names=", ".join(got.documents))
+            if not question and not got.images:
                 audio = None
                 if got.speech_error:
                     audio = assistant.speak(
@@ -360,7 +384,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 return
             reply = Reply()
             audio = fresh_audio(None)
-            for reply in assistant.respond(sess, question, options, got.image):
+            for reply in assistant.respond(sess, question, options, got.images):
                 yield history + render(reply), "busy", audio, *context_outputs(sess), *tables
                 audio, tables = gr.skip(), [gr.skip()] * 4
             voiced = (speak_on or bool(got.speech)) and not reply.error
@@ -394,7 +418,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 f"{VOICE_HINT} Распознавание речи: {stt_status(settings)}. "
                 f"Озвучивание: {tts_status()}."
             )
-            return status, gr.Timer(active=stt_loading(settings))
+            return status, gr.Timer(active=stt_loading(settings) or piper_loading())
 
         def on_check_voice(voice_id):
             path = assistant.speak("Голос ЛабМентора работает. Задайте вопрос голосом.", voice_id)
@@ -416,6 +440,13 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             [chatbot, voice_in, *dialog_outputs],
         ).then(on_speech_status, None, [speech_info, speech_timer])
         check_voice.click(on_check_voice, voice, [answer_audio, speech_info])
+
+        def on_voice_choice(voice_id):
+            if voice_id in MALE_VOICES:
+                preload_piper(True)
+            return on_speech_status()
+
+        voice.change(on_voice_choice, voice, [speech_info, speech_timer])
         speech_timer.tick(on_speech_status, None, [speech_info, speech_timer])
         demo.load(on_speech_status, None, [speech_info, speech_timer])
 
@@ -427,6 +458,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
         def on_clear(sess):
             sess.memory.clear()
             sess.exam = None
+            sess.forget_files()
             return [], fresh_audio(None), *context_outputs(sess)
 
         clear_btn.click(on_clear, session, [chatbot, answer_audio, context_info, summary_box])
@@ -450,12 +482,18 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             model,
         )
 
-        def on_kb_upload(files):
+        def on_kb_upload(files, *values):
             if files:
-                assistant.kb.add_files(files)
+                gr.Info("; ".join(assistant.add_uploads(files, make_options(*values))))
             return assistant.kb.describe(), gr.Dropdown(choices=assistant.lab_titles())
 
-        kb_upload.upload(on_kb_upload, kb_upload, [kb_info, lab])
+        kb_upload.upload(on_kb_upload, [kb_upload, *option_inputs], [kb_info, lab])
+
+        def on_forget():
+            gr.Info(f"Удалено загруженных файлов: {assistant.forget_uploads()}")
+            return assistant.kb.describe(), gr.Dropdown(choices=assistant.lab_titles())
+
+        forget_btn.click(on_forget, None, [kb_info, lab])
 
         def on_table(file, sess):
             if not file:

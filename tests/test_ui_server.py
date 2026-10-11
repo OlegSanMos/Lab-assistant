@@ -90,6 +90,18 @@ def test_rag_question_through_server(client):
     assert "Сообщений в окне:** 2 из 2" in context
 
 
+def test_file_without_question_is_read_and_summarized(client, tmp_path):
+    netlist = tmp_path / "amp.cir"
+    netlist.write_text("* Инвертирующий усилитель\nR1 in n1 10k\n.end\n", encoding="utf-8")
+    outputs = send(client, "", files=[netlist])
+    assert "📎 Читаю файлы: amp.cir..." in chat_text(outputs[0][0])
+    chat, _, audio, context, *_ = outputs[-1]
+    text = chat_text(chat)
+    assert "📎 amp.cir" in text and "База знаний пополнена: amp.cir: 1 фрагм." in text
+    assert "Цель работы: проверить закон Ома" in text
+    assert "Файлы в памяти диалога:** amp.cir" in context
+
+
 def test_table_attachment_and_data_agent(client):
     outputs = send(
         client, "Построй график I(U) и найди сопротивление", files=[SAMPLES / "ohm_law.csv"]

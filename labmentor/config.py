@@ -67,6 +67,10 @@ class Settings:
     def cache_dir(self) -> Path:
         return self.storage_dir / "cache"
 
+    @property
+    def uploads_dir(self) -> Path:
+        return self.storage_dir / "uploads"
+
     @classmethod
     def from_env(cls) -> Settings:
         return cls(

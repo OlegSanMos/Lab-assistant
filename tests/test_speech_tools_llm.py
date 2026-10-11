@@ -1,3 +1,5 @@
+import hashlib
+import io
 import shutil
 import sys
 import threading
@@ -289,6 +291,119 @@ def test_male_voice_never_silently_becomes_female(monkeypatch, tmp_path):
     path = speech.synthesize("Ответ", "ru-RU-SvetlanaNeural", tmp_path)
     assert open(path, "rb").read() == b"gtts" and calls == ["edge", "gtts"]
     assert speech.voice_note() == "" and speech.tts_status() == "Google TTS, женский голос"
+
+
+class FakePiperVoice:
+    def __init__(self, name):
+        self.name, self.texts = name, []
+
+    def synthesize_wav(self, text, wav):
+        self.texts.append(text)
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(22050)
+        wav.writeframes(b"\x00\x01" * 2205)
+
+
+def failing(text, voice, path):
+    raise RuntimeError("нет связи")
+
+
+def test_male_voice_is_spoken_by_offline_piper(monkeypatch, tmp_path):
+    import piper
+
+    urls, loaded = [], []
+
+    def fake_urlopen(request, timeout):
+        urls.append(request.full_url)
+        return io.BytesIO(b"onnx")
+
+    def fake_load(model, config, download_dir):
+        loaded.append((model.name, config.name, download_dir))
+        return FakePiperVoice(model.stem)
+
+    monkeypatch.setenv("HF_ENDPOINT", "https://hf-mirror.com/")
+    monkeypatch.setitem(speech.PIPER_MD5, "ru_RU-dmitri-medium", hashlib.md5(b"onnx").hexdigest())
+    monkeypatch.setattr(speech.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(piper.PiperVoice, "load", staticmethod(fake_load))
+    monkeypatch.setattr(speech, "_edge_tts", failing)
+    path = speech.synthesize("Цель работы", "ru-RU-DmitryNeural", tmp_path)
+    with wave.open(path) as wav:
+        assert wav.getnframes() == 2205 and wav.getframerate() == 22050
+    base = "https://hf-mirror.com/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/"
+    assert urls == [f"{base}ru_RU-dmitri-medium.onnx", f"{base}ru_RU-dmitri-medium.onnx.json"]
+    model = speech.VOICES_DIR / "ru_RU-dmitri-medium.onnx"
+    assert loaded == [(model.name, "ru_RU-dmitri-medium.onnx.json", speech.VOICES_DIR)]
+    assert speech.piper_cached(True) and not list(speech.VOICES_DIR.glob("*.part"))
+    assert speech._piper["ru_RU-dmitri-medium"].texts == ["Цель работы"]
+    assert speech.tts_status() == "нейросетевой голос Piper (без интернета), мужской голос"
+    loader = speech._piper_threads["ru_RU-dmitri-medium"]
+    assert speech.voice_note() == "" and speech.preload_piper(True) is loader
+    assert not loader.is_alive()
+
+
+def test_male_voice_waits_for_piper_download(monkeypatch, tmp_path):
+    import piper
+
+    release = threading.Event()
+
+    def slow_urlopen(request, timeout):
+        release.wait(5)
+        return io.BytesIO(b"onnx")
+
+    monkeypatch.setattr(speech, "PIPER_WAIT", 0.2)
+    monkeypatch.setitem(speech.PIPER_MD5, "ru_RU-dmitri-medium", hashlib.md5(b"onnx").hexdigest())
+    monkeypatch.setattr(speech.urllib.request, "urlopen", slow_urlopen)
+    monkeypatch.setattr(
+        piper.PiperVoice, "load", staticmethod(lambda m, c, download_dir: FakePiperVoice(m.stem))
+    )
+    monkeypatch.setattr(speech, "_edge_tts", failing)
+    monkeypatch.setattr(speech, "_system_voice", failing)
+    monkeypatch.setattr(speech, "_google_tts", lambda text, voice, path: path.write_bytes(b"mp3"))
+    assert speech.synthesize("Ответ", "ru-RU-DmitryNeural", tmp_path).endswith(".mp3")
+    assert speech.piper_loading() and "Мужской голос Piper еще загружается" in speech.voice_note()
+    release.set()
+    speech._piper_threads["ru_RU-dmitri-medium"].join(5)
+    speech._skip_until.clear()
+    assert speech.synthesize("Ответ", "ru-RU-DmitryNeural", tmp_path).endswith(".wav")
+    assert not speech.piper_loading() and speech.tts_status().endswith("мужской голос")
+
+
+def test_broken_voice_download_is_not_kept(monkeypatch):
+    monkeypatch.setattr(
+        speech.urllib.request, "urlopen", lambda request, timeout: io.BytesIO(b"<html>")
+    )
+    with pytest.raises(RuntimeError, match="скачался не полностью или поврежден"):
+        speech.download_piper("ru_RU-dmitri-medium")
+    assert list(speech.VOICES_DIR.iterdir()) == [] and not speech.piper_cached(True)
+
+
+def test_voice_download_falls_back_to_mirror(monkeypatch):
+    hosts = []
+
+    def blocked_main_host(request, timeout):
+        hosts.append(request.full_url.split("/rhasspy")[0])
+        if "huggingface.co" in request.full_url:
+            raise OSError("Connection refused")
+        return io.BytesIO(b"onnx")
+
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    monkeypatch.setitem(speech.PIPER_MD5, "ru_RU-dmitri-medium", hashlib.md5(b"onnx").hexdigest())
+    monkeypatch.setattr(speech.urllib.request, "urlopen", blocked_main_host)
+    speech.download_piper("ru_RU-dmitri-medium")
+    assert hosts == ["https://huggingface.co", "https://hf-mirror.com"] * 2
+    assert speech.piper_cached(True)
+
+
+def test_failed_engine_waits_longer_after_each_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(speech, "_edge_tts", failing)
+    monkeypatch.setattr(speech, "_google_tts", lambda text, voice, path: path.write_bytes(b"mp3"))
+    delays = []
+    for _ in range(5):
+        speech._skip_until.clear()
+        speech.synthesize("Ответ", "ru-RU-SvetlanaNeural", tmp_path)
+        delays.append(round(speech._skip_until["edge:ru-RU-SvetlanaNeural"] - time.monotonic(), -1))
+    assert delays == [60, 240, 960, 1800, 1800]
 
 
 def test_hanging_tts_engine_times_out(monkeypatch, tmp_path):

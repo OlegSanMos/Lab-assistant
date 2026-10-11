@@ -14,11 +14,16 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from labmentor import speech
 from labmentor.assistant import LabAssistant
 from labmentor.config import PROJECT_DIR, Settings
 
 SAMPLES = PROJECT_DIR / "data" / "samples"
 DEMO_MANUALS = PROJECT_DIR / "tests" / "data" / "manuals"
+SCAN_TEXT = (
+    "Лабораторная работа 7. Измерение емкости конденсатора. Цель работы: определить емкость по "
+    "времени разряда RC-цепи."
+)
 FRAGMENT = re.compile(r"\[([^\]\n]+)\]\n(.+?)(?=\n\n\[[^\]\n]+\]\n|\Z)", re.S)
 
 
@@ -85,6 +90,8 @@ def lab_responder(messages: list[BaseMessage]) -> AIMessage | str:
             return "research"
         if "проверь меня" in text:
             return "exam"
+        if "на фото" in text:
+            return "vision"
         return "manual"
     if "агент-аналитик" in system:
         if not tool_results:
@@ -133,6 +140,8 @@ def lab_responder(messages: list[BaseMessage]) -> AIMessage | str:
         return "Цель работы: проверить закон Ома и определить сопротивление [lr1_ohm_law.md]."
     if "прислал изображение" in system:
         return "На осциллограмме экспоненциальный разряд, tau около 1 с."
+    if "Ты распознаешь текст" in system:
+        return SCAN_TEXT
     if "Составь черновик отчета" in system:
         return (
             "## Цель работы\nПроверить закон Ома.\n## Результаты измерений и их обработка\n"
@@ -148,6 +157,25 @@ def course_responder(messages: list[BaseMessage]) -> AIMessage | str:
         if match:
             return f"{match.group(2).strip()} [{match.group(1)}]"
     return lab_responder(messages)
+
+
+@pytest.fixture(autouse=True)
+def offline_voices(monkeypatch, tmp_path_factory):
+    def no_network(*args, **kwargs):
+        raise OSError("сеть в автотестах отключена")
+
+    monkeypatch.setattr(speech, "VOICES_DIR", tmp_path_factory.mktemp("voices"))
+    monkeypatch.setattr(speech.urllib.request, "urlopen", no_network)
+    speech._tts_state.update(engine="", voice="")
+    for state in (
+        speech._skip_until,
+        speech._tts_failures,
+        speech._tts_errors,
+        speech._piper,
+        speech._piper_state,
+        speech._piper_threads,
+    ):
+        state.clear()
 
 
 @pytest.fixture

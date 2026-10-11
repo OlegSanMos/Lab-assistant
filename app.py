@@ -6,7 +6,7 @@ import sys
 from labmentor.assistant import LabAssistant
 from labmentor.config import Settings, use_system_certificates
 from labmentor.llm import check_setup
-from labmentor.speech import preload
+from labmentor.speech import MALE_VOICES, preload, preload_piper
 from labmentor.ui import build_ui, launch_options
 
 DEFAULT_PORT = 7860
@@ -77,6 +77,8 @@ def main() -> None:
     print(f"Провайдер LLM: {settings.provider}, модель: {settings.chat_model}")
     print(f"База знаний: {assistant.kb_status}")
     preload(settings)
+    if settings.tts_voice in MALE_VOICES:
+        preload_piper(True)
     demo = build_ui(assistant)
     demo.queue(default_concurrency_limit=4).launch(
         server_name=args.host, server_port=port, share=args.share, **launch_options(settings)

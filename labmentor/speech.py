@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -8,7 +9,9 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 import uuid
+import wave
 from functools import lru_cache
 from pathlib import Path
 
@@ -21,10 +24,20 @@ VOICES = {
     "Мужской": "ru-RU-DmitryNeural",
 }
 MALE_VOICES = {"ru-RU-DmitryNeural"}
+PIPER_VOICES = {True: "ru_RU-dmitri-medium", False: "ru_RU-irina-medium"}
+PIPER_MD5 = {
+    "ru_RU-dmitri-medium": "589ccc91745a1e2353508ff62c5941b7",
+    "ru_RU-irina-medium": "21fbe77fdc68bdc35d7adb6bf4f52199",
+}
+PIPER_MB = 63
+PIPER_HOSTS = ("https://huggingface.co", "https://hf-mirror.com")
+PIPER_WAIT = 60
+VOICES_DIR = Path.home() / ".cache" / "labmentor" / "voices"
 MAX_TTS_CHARS = 700
 SAMPLE_RATE = 16000
 TTS_TIMEOUT = 25
 RETRY_AFTER = 60
+MAX_RETRY_AFTER = 1800
 MALE_HINTS = {
     "darwin": "в macOS установите русский голос Yuri: Системные настройки, Универсальный доступ, "
     "раздел озвучивания текста (Spoken Content), Системный голос, Управлять голосами",
@@ -38,6 +51,7 @@ NO_SPEECH = (
 TTS_NAMES = {
     "edge": "нейросетевой голос Edge TTS",
     "gtts": "Google TTS",
+    "piper": "нейросетевой голос Piper (без интернета)",
     "system": "системный голос компьютера (без интернета)",
 }
 
@@ -266,8 +280,14 @@ def _short(exc: BaseException) -> str:
 
 
 _skip_until: dict[str, float] = {}
+_tts_failures: dict[str, int] = {}
 _tts_errors: dict[str, str] = {}
 _tts_state = {"engine": "", "voice": ""}
+_piper: dict[str, object] = {}
+_piper_state: dict[str, str] = {}
+_piper_threads: dict[str, threading.Thread] = {}
+_piper_lock = threading.Lock()
+_piper_speak_lock = threading.Lock()
 
 
 def text_for_speech(text: str, limit: int = MAX_TTS_CHARS) -> str:
@@ -296,14 +316,20 @@ def synthesize(text: str, voice: str, out_dir: Path) -> str | None:
         key = f"{name}:{voice}"
         if time.monotonic() < _skip_until.get(key, 0):
             continue
+        loading = preload_piper(voice in MALE_VOICES) if name == "piper" else None
+        if loading is not None:
+            loading.join(PIPER_WAIT)
         path = out_dir / f"answer_{uuid.uuid4().hex[:8]}.{ext}"
         error = try_engine(engine, clean, voice, path)
         if error is None:
             _tts_state["engine"] = name
             _tts_errors.pop(key, None)
+            _tts_failures.pop(key, None)
             return str(path)
         _tts_errors[key] = error
-        _skip_until[key] = time.monotonic() + RETRY_AFTER
+        _tts_failures[key] = _tts_failures.get(key, 0) + 1
+        delay = RETRY_AFTER * 4 ** (_tts_failures[key] - 1)
+        _skip_until[key] = time.monotonic() + min(delay, MAX_RETRY_AFTER)
     _tts_state["engine"] = ""
     return None
 
@@ -311,8 +337,113 @@ def synthesize(text: str, voice: str, out_dir: Path) -> str | None:
 def tts_engines(voice: str = "") -> list[tuple]:
     edge = ("edge", _edge_tts, "mp3")
     google = ("gtts", _google_tts, "mp3")
+    piper = ("piper", _piper_tts, "wav")
     system = ("system", _system_voice, "wav")
-    return [edge, system, google] if voice in MALE_VOICES else [edge, google, system]
+    if voice in MALE_VOICES:
+        return [edge, piper, system, google]
+    return [edge, google, piper, system]
+
+
+def piper_files(name: str) -> tuple[Path, Path]:
+    model = VOICES_DIR / f"{name}.onnx"
+    return model, model.with_name(f"{name}.onnx.json")
+
+
+def piper_urls(name: str, extension: str) -> list[str]:
+    language, speaker, quality = name.split("-")
+    folder = f"{language.split('_')[0]}/{language}/{speaker}/{quality}"
+    hosts = [os.getenv("HF_ENDPOINT", ""), *PIPER_HOSTS]
+    urls = [
+        f"{host.rstrip('/')}/rhasspy/piper-voices/resolve/main/{folder}/{name}{extension}"
+        for host in hosts
+        if host
+    ]
+    return list(dict.fromkeys(urls))
+
+
+def _intact(path: Path, digest: str | None = None) -> bool:
+    if not path.exists() or not path.stat().st_size:
+        return False
+    if digest is None:
+        return True
+    md5 = hashlib.md5(usedforsecurity=False)
+    with open(path, "rb") as file:
+        for block in iter(lambda: file.read(1 << 20), b""):
+            md5.update(block)
+    return md5.hexdigest() == digest
+
+
+def download_piper(name: str) -> None:
+    model, config = piper_files(name)
+    for path, extension, digest in (
+        (model, ".onnx", PIPER_MD5.get(name)),
+        (config, ".onnx.json", None),
+    ):
+        if _intact(path, digest):
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        part = path.with_name(f"{path.name}.part")
+        error = ""
+        for url in piper_urls(name, extension):
+            request = urllib.request.Request(url, headers={"User-Agent": "LabMentor"})
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    with open(part, "wb") as file:
+                        shutil.copyfileobj(response, file)
+            except OSError as exc:
+                error = _short(exc)
+                continue
+            if _intact(part, digest):
+                part.replace(path)
+                break
+            error = f"файл {path.name} скачался не полностью или поврежден"
+        else:
+            part.unlink(missing_ok=True)
+            raise RuntimeError(error)
+
+
+def piper_cached(male: bool) -> bool:
+    return all(_intact(path) for path in piper_files(PIPER_VOICES[male]))
+
+
+def preload_piper(male: bool) -> threading.Thread | None:
+    name = PIPER_VOICES[male]
+    with _piper_lock:
+        thread = _piper_threads.get(name)
+        if name not in _piper and (thread is None or not thread.is_alive()):
+            thread = threading.Thread(target=_load_piper, args=(name,), daemon=True)
+            _piper_threads[name] = thread
+            thread.start()
+    return thread
+
+
+def _load_piper(name: str) -> None:
+    _piper_state[name] = "загружается"
+    try:
+        download_piper(name)
+        from piper import PiperVoice
+
+        model, config = piper_files(name)
+        _piper[name] = PiperVoice.load(model, config, download_dir=VOICES_DIR)
+    except ImportError:
+        _piper_state[name] = "не установлен пакет piper-tts (pip install -r requirements.txt)"
+        return
+    except Exception as exc:
+        _piper_state[name] = f"не загружен ({_short(exc)})"
+        return
+    _piper_state[name] = "готов"
+
+
+def piper_loading() -> bool:
+    return "загружается" in _piper_state.values()
+
+
+def _piper_tts(text: str, voice: str, path: Path) -> None:
+    name = PIPER_VOICES[voice in MALE_VOICES]
+    if name not in _piper:
+        raise RuntimeError(f"голос {_piper_state.get(name, 'не загружен')}")
+    with _piper_speak_lock, wave.open(str(path), "wb") as wav:
+        _piper[name].synthesize_wav(text, wav)
 
 
 def male_voice_missing() -> bool:
@@ -330,23 +461,36 @@ def _reasons(voice: str, names: tuple[str, ...]) -> str:
 def voice_note() -> str:
     if not male_voice_missing():
         return ""
+    if _piper_state.get(PIPER_VOICES[True]) == "загружается":
+        return (
+            f"Мужской голос Piper еще загружается (около {PIPER_MB} МБ, только при первом "
+            "запуске), поэтому этот ответ озвучен женским голосом."
+        )
+    reasons = _reasons(_tts_state["voice"], ("edge", "piper", "system"))
     hint = MALE_HINTS.get(sys.platform, "установите espeak-ng")
     return (
-        f"Мужской голос сейчас недоступен ({_reasons(_tts_state['voice'], ('edge', 'system'))}), "
-        f"ответ озвучен женским голосом. Чтобы мужской голос работал и без интернета, {hint}."
+        f"Мужской голос сейчас недоступен ({reasons}), ответ озвучен женским голосом. Мужской "
+        f"голос Piper работает без интернета, но один раз скачивается с huggingface.co (около "
+        f"{PIPER_MB} МБ): проверьте интернет или укажите в .env зеркало "
+        f"HF_ENDPOINT=https://hf-mirror.com. Еще один вариант: {hint}."
     )
 
 
 def tts_status() -> str:
     engine, voice = _tts_state["engine"], _tts_state["voice"]
-    if not voice:
-        return "голос выбирается при первом ответе"
-    if not engine:
-        return f"недоступно ({_reasons(voice, tuple(TTS_NAMES))})"
-    male = voice in MALE_VOICES and not male_voice_missing()
-    status = f"{TTS_NAMES[engine]}, {'мужской' if male else 'женский'} голос"
     note = voice_note()
-    return f"{status}. {note}" if note else status
+    if not voice:
+        status = "голос выбирается при первом ответе"
+    elif not engine:
+        status = f"недоступно ({_reasons(voice, tuple(TTS_NAMES))})"
+    else:
+        male = voice in MALE_VOICES and not male_voice_missing()
+        status = f"{TTS_NAMES[engine]}, {'мужской' if male else 'женский'} голос"
+    if note:
+        return f"{status}. {note}"
+    if _piper_state.get(PIPER_VOICES[True]) == "загружается":
+        status += f"; мужской голос Piper загружается (около {PIPER_MB} МБ)"
+    return status
 
 
 def try_engine(engine, text: str, voice: str, path: Path) -> str | None:

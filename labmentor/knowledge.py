@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import tempfile
+import zipfile
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 import snowballstemmer
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
@@ -13,7 +19,22 @@ from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rank_bm25 import BM25Okapi
 
-DOC_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
+DOC_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".pdf",
+    ".docx",
+    ".pptx",
+    ".odt",
+    ".odp",
+    ".rtf",
+    ".doc",
+    ".html",
+    ".htm",
+}
+CONVERTED = {".rtf", ".doc"}
+DRAWING = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+OPEN_TEXT = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
 
 _stemmers = {"ru": snowballstemmer.stemmer("russian"), "en": snowballstemmer.stemmer("english")}
 _word_re = re.compile(r"\w+", re.UNICODE)
@@ -39,6 +60,100 @@ def tokenize(text: str) -> list[str]:
     return [_stemmers["ru" if _cyrillic_re.search(w) else "en"].stemWord(w) for w in words]
 
 
+def decode_text(raw: bytes) -> str:
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1251", errors="replace")
+
+
+def is_text_file(path: Path) -> bool:
+    with open(path, "rb") as file:
+        head = file.read(4096)
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return True
+    if not head or b"\x00" in head:
+        return False
+    sample = decode_text(head)
+    printable = sum(char.isprintable() or char in "\t\n\r\f" for char in sample)
+    return printable >= 0.95 * len(sample)
+
+
+class _HTMLText(HTMLParser):
+    BLOCKS = {"p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "section"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag, attrs) -> None:
+        if tag in ("script", "style"):
+            self.hidden += 1
+        elif tag in self.BLOCKS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag) -> None:
+        if tag in ("script", "style"):
+            self.hidden = max(0, self.hidden - 1)
+        elif tag in self.BLOCKS:
+            self.parts.append("\n")
+
+    def handle_data(self, data) -> None:
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def html_text(source: str) -> str:
+    parser = _HTMLText()
+    parser.feed(source)
+    return re.sub(r"\n\s*\n+", "\n\n", "".join(parser.parts)).strip()
+
+
+def office_text(path: Path) -> str:
+    with zipfile.ZipFile(path) as archive:
+        if path.suffix.lower() != ".pptx":
+            root = ElementTree.fromstring(archive.read("content.xml"))
+            blocks = (e for e in root.iter() if e.tag in (OPEN_TEXT + "h", OPEN_TEXT + "p"))
+            return "\n".join("".join(block.itertext()) for block in blocks)
+        slides = sorted(
+            (n for n in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
+            key=lambda n: int(re.search(r"\d+", n).group()),
+        )
+        parts = []
+        for number, name in enumerate(slides, start=1):
+            root = ElementTree.fromstring(archive.read(name))
+            lines = [
+                "".join(t.text or "" for t in p.iter(DRAWING + "t"))
+                for p in root.iter(DRAWING + "p")
+            ]
+            parts.append(f"Слайд {number}\n" + "\n".join(line for line in lines if line.strip()))
+        return "\n\n".join(parts)
+
+
+def converted_text(path: Path) -> str:
+    if shutil.which("textutil"):
+        command = ["textutil", "-convert", "txt", "-stdout", str(path)]
+        result = subprocess.run(command, capture_output=True, timeout=120)
+        if result.returncode == 0:
+            return decode_text(result.stdout)
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if office:
+        with tempfile.TemporaryDirectory() as folder:
+            profile = (Path(folder) / "profile").as_uri()
+            command = [office, f"-env:UserInstallation={profile}", "--headless"]
+            command += ["--convert-to", "txt:Text (encoded):UTF8", "--outdir", folder, str(path)]
+            subprocess.run(command, capture_output=True, timeout=180)
+            for text in Path(folder).glob("*.txt"):
+                return decode_text(text.read_bytes())
+    raise ValueError(
+        f"файлы {path.suffix} читаются в macOS или при установленном LibreOffice; сохраните файл "
+        "как DOCX или PDF и загрузите снова"
+    )
+
+
 def load_file(path: str | Path) -> list[Document]:
     path = Path(path)
     ext = path.suffix.lower()
@@ -59,10 +174,16 @@ def load_file(path: str | Path) -> list[Document]:
         for table in document.tables:
             parts += [" | ".join(cell.text.strip() for cell in row.cells) for row in table.rows]
         text = "\n".join(parts)
-    elif ext in {".txt", ".md"}:
-        text = path.read_text(encoding="utf-8", errors="ignore")
+    elif ext in (".pptx", ".odt", ".odp"):
+        text = office_text(path)
+    elif ext in CONVERTED:
+        text = converted_text(path)
+    elif ext in (".html", ".htm"):
+        text = html_text(decode_text(path.read_bytes()))
+    elif ext in (".txt", ".md") or is_text_file(path):
+        text = decode_text(path.read_bytes())
     else:
-        raise ValueError(f"Формат {ext} не поддерживается")
+        raise ValueError(f"формат {ext or 'без расширения'} не поддерживается")
     return [Document(page_content=text, metadata={"source": path.name})] if text.strip() else []
 
 
@@ -73,11 +194,13 @@ def format_docs(docs: list[Document]) -> str:
 class HybridRetriever(BaseRetriever):
     kb: Any
     k: int = 4
+    only: set[str] | None = None
+    prefer: set[str] | None = None
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> list[Document]:
-        return self.kb.search(query, self.k)
+        return self.kb.search(query, self.k, only=self.only, prefer=self.prefer)
 
 
 class KnowledgeBase:
@@ -101,30 +224,45 @@ class KnowledgeBase:
         return self.add_files(files) if files else "Каталог методичек пуст"
 
     def add_files(self, paths: list[str | Path]) -> str:
-        report, new_chunks = [], []
+        report = []
         for path in map(Path, paths):
             try:
                 docs = load_file(path)
             except Exception as exc:
                 report.append(f"{path.name}: ошибка чтения ({exc})")
                 continue
-            if not docs:
-                report.append(f"{path.name}: текст не найден")
-                continue
-            self.chunks = [c for c in self.chunks if c.metadata["source"] != path.name]
-            title = self._title(docs[0].page_content, path)
-            self.titles[path.name] = title
-            lab = lab_number(title)
-            chunks = self.splitter.split_documents(docs)
-            for number, chunk in enumerate(chunks, start=1):
-                chunk.metadata.update(title=title, chunk=number, lab=lab)
-                if title not in chunk.page_content[: len(title) + 4]:
-                    chunk.page_content = f"{title}\n{chunk.page_content}"
-            new_chunks += chunks
-            report.append(f"{path.name}: {len(chunks)} фрагм.")
-        self.chunks += new_chunks
+            report.append(self._add(path.name, docs))
         self._rebuild_index()
         return "; ".join(report)
+
+    def add_documents(self, documents: dict[str, list[Document]]) -> str:
+        report = [self._add(name, docs) for name, docs in documents.items()]
+        self._rebuild_index()
+        return "; ".join(report)
+
+    def count(self, name: str) -> int:
+        return sum(1 for c in self.chunks if c.metadata["source"] == name)
+
+    def remove(self, names: set[str]) -> None:
+        self.chunks = [c for c in self.chunks if c.metadata["source"] not in names]
+        for name in names:
+            self.titles.pop(name, None)
+        self._rebuild_index()
+
+    def _add(self, name: str, docs: list[Document]) -> str:
+        if not docs:
+            return f"{name}: текст не найден"
+        self.chunks = [c for c in self.chunks if c.metadata["source"] != name]
+        title = self._title(docs[0].page_content, Path(name))
+        self.titles[name] = title
+        lab = lab_number(title)
+        chunks = self.splitter.split_documents(docs)
+        for number, chunk in enumerate(chunks, start=1):
+            chunk.metadata.update(source=name, title=title, chunk=number, lab=lab)
+            if title not in chunk.page_content[: len(title) + 4]:
+                chunk.page_content = f"{title}\n{chunk.page_content}"
+        self.chunks += chunks
+        return f"{name}: {len(chunks)} фрагм."
 
     def _rebuild_index(self) -> None:
         self._bm25 = (
@@ -147,27 +285,39 @@ class KnowledgeBase:
                 return line.strip("# ").strip()[:200]
         return path.stem
 
-    def search(self, query: str, k: int = 4) -> list[Document]:
+    def search(
+        self,
+        query: str,
+        k: int = 4,
+        only: set[str] | None = None,
+        prefer: set[str] | None = None,
+    ) -> list[Document]:
         if not self.chunks:
             return []
-        rankings: list[list[int]] = []
+        allowed = [i for i, c in enumerate(self.chunks) if only and c.metadata["source"] in only]
+        candidates = allowed or range(len(self.chunks))
         depth = max(3 * k, 10)
         scores = self._bm25.get_scores(tokenize(query))
-        bm25_rank = [
-            i for i in sorted(range(len(scores)), key=lambda i: -scores[i]) if scores[i] > 0
-        ]
-        rankings.append(bm25_rank[:depth])
+        bm25_rank = [i for i in sorted(candidates, key=lambda i: -scores[i]) if scores[i] > 0]
+        rankings = [bm25_rank[:depth]]
+        if allowed:
+            rankings.append(allowed[:depth])
         numbers = set(_lab_number_re.findall(query))
         if numbers:
             wanted = {
                 i
-                for i, c in enumerate(self.chunks)
-                if any(same_lab(n, c.metadata.get("lab", "")) for n in numbers)
+                for i in candidates
+                if any(same_lab(n, self.chunks[i].metadata.get("lab", "")) for n in numbers)
             }
             rankings.append([i for i in bm25_rank if i in wanted] + sorted(wanted - set(bm25_rank)))
+        elif prefer:
+            chosen = [i for i in candidates if self.chunks[i].metadata["source"] in prefer]
+            first = [i for i in bm25_rank if i in set(chosen)]
+            rankings.append((first + [i for i in chosen if i not in set(first)])[:depth])
         if self.vector_store is not None:
+            keep = (lambda doc: doc.metadata["source"] in only) if allowed else None
             try:
-                found = self.vector_store.similarity_search(query, k=depth)
+                found = self.vector_store.similarity_search(query, k=depth, filter=keep)
                 rankings.append([int(doc.id) for doc in found])
             except Exception as exc:
                 self.vector_error = str(exc)
@@ -178,8 +328,10 @@ class KnowledgeBase:
         best = sorted(fused, key=fused.get, reverse=True)[:k]
         return [self.chunks[i] for i in best]
 
-    def as_retriever(self, k: int = 4) -> HybridRetriever:
-        return HybridRetriever(kb=self, k=k)
+    def as_retriever(
+        self, k: int = 4, only: set[str] | None = None, prefer: set[str] | None = None
+    ) -> HybridRetriever:
+        return HybridRetriever(kb=self, k=k, only=only, prefer=prefer)
 
     def describe(self) -> str:
         if not self.chunks:

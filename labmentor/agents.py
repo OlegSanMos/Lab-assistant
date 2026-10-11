@@ -34,18 +34,33 @@ DATA_PROMPT = ROLE + (
 )
 
 
+def context_prompt(files: str, summary: str) -> str:
+    return (
+        f"\n\nФайлы, загруженные студентом в этом диалоге:\n{files}\n\n"
+        f"Резюме предыдущей части диалога: {summary}"
+    )
+
+
 def build_research_agent(
-    llm: BaseChatModel, kb: KnowledgeBase, top_k: int, allow_web: bool, summary: str
+    llm: BaseChatModel,
+    kb: KnowledgeBase,
+    top_k: int,
+    allow_web: bool,
+    summary: str,
+    files: str = "нет",
+    focus: dict | None = None,
 ):
-    tools = [make_manual_search_tool(kb, top_k), calculator]
+    tools = [make_manual_search_tool(kb, top_k, **(focus or {})), calculator]
     if allow_web:
         tools += [web_search, wikipedia_search]
-    prompt = RESEARCH_PROMPT + f"\n\nРезюме предыдущей части диалога: {summary}"
+    prompt = RESEARCH_PROMPT + context_prompt(files, summary)
     return create_agent(llm, tools, system_prompt=prompt, name="research_agent")
 
 
-def build_data_agent(llm: BaseChatModel, ws: DataWorkspace, output_dir: Path, summary: str):
-    prompt = DATA_PROMPT + f"\n\nРезюме предыдущей части диалога: {summary}"
+def build_data_agent(
+    llm: BaseChatModel, ws: DataWorkspace, output_dir: Path, summary: str, files: str = "нет"
+):
+    prompt = DATA_PROMPT + context_prompt(files, summary)
     return create_agent(
         llm, make_data_tools(ws, output_dir), system_prompt=prompt, name="data_agent"
     )

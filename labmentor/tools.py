@@ -79,13 +79,16 @@ def calculator(expression: str) -> str:
         return f"Ошибка вычисления: {exc}"
 
 
-def make_manual_search_tool(kb: KnowledgeBase, k: int = 4) -> BaseTool:
+def make_manual_search_tool(
+    kb: KnowledgeBase, k: int = 4, only: set[str] | None = None, prefer: set[str] | None = None
+) -> BaseTool:
 
     @tool
     def search_lab_manuals(query: str) -> str:
-        """Поиск по методическим указаниям к лабораторным работам: цель, теория, формулы,
-        порядок выполнения, обработка результатов, требования к отчету."""
-        docs = kb.search(query, k)
+        """Поиск по методическим указаниям к лабораторным работам и файлам, загруженным
+        студентом: цель, теория, формулы, порядок выполнения, обработка результатов, требования
+        к отчету."""
+        docs = kb.search(query, k, only=only, prefer=prefer)
         return format_docs(docs) if docs else "В методических указаниях ничего не найдено"
 
     return search_lab_manuals

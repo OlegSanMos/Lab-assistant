@@ -30,7 +30,7 @@ def test_router_selects_flowchart_and_draws_image(assistant):
 def test_data_agent_calls_tools_and_plots(assistant, sample):
     session = assistant.new_session()
     got = assistant.ingest(session, [sample("ohm_law.csv")])
-    assert got.notes[0].startswith("Загружена таблица") and got.image is None and got.speech == ""
+    assert got.notes[0].startswith("Загружена таблица") and got.images == [] and got.speech == ""
     reply = run(assistant, session, "Построй график I(U) и найди сопротивление")
     assert reply.route == "data"
     assert [step["title"] for step in reply.steps[1:]] == [

@@ -28,7 +28,7 @@ ROLE = (
     + FORMULAS
 )
 
-ROUTES = ("manual", "research", "data", "flowchart", "exam", "chat")
+ROUTES = ("manual", "research", "data", "flowchart", "exam", "vision", "chat")
 
 ROUTER_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -44,19 +44,27 @@ ROUTER_PROMPT = ChatPromptTemplate.from_messages(
             "график);\n"
             "flowchart: просьба нарисовать схему или блок-схему порядка выполнения работы;\n"
             "exam: просьба проверить знания, задать контрольные вопросы, подготовить к защите;\n"
-            "chat: приветствие, благодарность или общий вопрос без источников.",
+            "vision: вопрос о фото, схеме, осциллограмме или графике, которые уже присланы;\n"
+            "chat: приветствие, благодарность или общий вопрос без источников.\n"
+            "Вопрос о загруженном студентом файле (методичка, статья, заметки) отдавай manual.",
         ),
-        ("human", "Загружена таблица с данными: {has_table}.\nЗапрос: {question}"),
+        (
+            "human",
+            "Загружена таблица с данными: {has_table}.\n"
+            "Файлы, загруженные студентом в диалоге:\n{files}\n"
+            "Запрос: {question}",
+        ),
     ]
-)
+).partial(files="нет")
 
 RAG_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            ROLE + "\n\nОтвечай на основе фрагментов методических указаний. Если в них нет ответа, "
-            "скажи об этом и подскажи, где искать. Указывай источник в квадратных скобках, "
-            "например [lab_01_diod-stab.md].\n\n"
+            ROLE + "\n\nОтвечай на основе фрагментов методических указаний и файлов студента. "
+            "Если в них нет ответа, скажи об этом и подскажи, где искать. Указывай источник в "
+            "квадратных скобках, например [lab_01_diod-stab.md].\n\n"
+            "Файлы, загруженные студентом в этом диалоге:\n{files}\n\n"
             "Резюме предыдущей части диалога: {summary}\n\n"
             "Фрагменты методических указаний:\n"
             "{context}",
@@ -64,15 +72,19 @@ RAG_PROMPT = ChatPromptTemplate.from_messages(
         MessagesPlaceholder("history"),
         ("human", "{question}"),
     ]
-)
+).partial(files="нет")
 
 CHAT_PROMPT = ChatPromptTemplate.from_messages(
     [
-        ("system", ROLE + "\n\nРезюме предыдущей части диалога: {summary}"),
+        (
+            "system",
+            ROLE + "\n\nФайлы, загруженные студентом в этом диалоге:\n{files}\n\n"
+            "Резюме предыдущей части диалога: {summary}",
+        ),
         MessagesPlaceholder("history"),
         ("human", "{question}"),
     ]
-)
+).partial(files="нет")
 
 SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -124,14 +136,28 @@ VISION_PROMPT = ChatPromptTemplate.from_messages(
             + "\n\nСтудент прислал изображение: фото лабораторной установки, электрическую схему, "
             "осциллограмму, график или фрагмент отчета. Опиши, что изображено, сними числовые "
             "значения с учетом масштаба и цены деления, найди ошибки (подключение приборов, "
-            "оформление графика) и ответь на вопрос студента.\n\n"
+            "оформление графика) и ответь на вопрос студента. Если изображений несколько, "
+            "называй их по порядку.\n\n"
+            "Файлы, загруженные студентом в этом диалоге:\n{files}\n\n"
             "Резюме предыдущей части диалога: {summary}",
         ),
         MessagesPlaceholder("history"),
+        MessagesPlaceholder("request"),
+    ]
+).partial(files="нет")
+
+OCR_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "Ты распознаешь текст на изображении страницы документа. Перепиши весь текст страницы "
+            "дословно, сохраняя порядок абзацев, заголовки и таблицы. Формулы записывай в LaTeX. "
+            "Не добавляй своих пояснений.",
+        ),
         (
             "human",
             [
-                {"type": "text", "text": "{question}"},
+                {"type": "text", "text": "Распознай текст этой страницы."},
                 {"type": "image_url", "image_url": {"url": "{image_url}"}},
             ],
         ),
@@ -304,6 +330,10 @@ def build_grade_chain(llm: BaseChatModel) -> Runnable:
 
 def build_vision_chain(llm: BaseChatModel) -> Runnable:
     return VISION_PROMPT | llm | StrOutputParser()
+
+
+def build_ocr_chain(llm: BaseChatModel) -> Runnable:
+    return OCR_PROMPT | llm | StrOutputParser()
 
 
 def build_flowchart_chain(llm: BaseChatModel) -> Runnable:

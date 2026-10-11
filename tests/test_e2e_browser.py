@@ -134,6 +134,15 @@ def test_image_and_exam_dialog(page):
     visible(page, "Итог тренировочной защиты")
 
 
+def test_any_file_is_read_and_remembered(page, tmp_path):
+    netlist = tmp_path / "filter.cir"
+    netlist.write_text("* RC-фильтр\nR1 in out 1k\nC1 out 0 1u\n.end\n", encoding="utf-8")
+    ask(page, "", files=[netlist])
+    visible(page, "📎 filter.cir")
+    visible(page, "Цель работы: проверить закон Ома")
+    visible(page, "Файлы в памяти диалога: filter.cir")
+
+
 def test_data_processing_tab(page):
     page.get_by_role("tab", name="📊 Обработка данных").click()
     page.locator('input[type=file][accept=".csv, .tsv, .xlsx"]').set_input_files(
