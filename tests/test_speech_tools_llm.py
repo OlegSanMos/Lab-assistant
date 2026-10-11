@@ -234,7 +234,8 @@ def test_synthesis_falls_back_and_skips_failed_engines(monkeypatch, tmp_path):
 
     monkeypatch.setattr(speech, "_edge_tts", engine("edge"))
     path = speech.synthesize("**Ответ:** R = 101 Ом", "ru-RU-SvetlanaNeural", tmp_path)
-    assert open(path, "rb").read() == b"edge" and speech.tts_status() == speech.TTS_NAMES["edge"]
+    assert open(path, "rb").read() == b"edge"
+    assert speech.tts_status() == "нейросетевой голос Edge TTS, женский голос"
 
     monkeypatch.setattr(speech, "_edge_tts", engine("edge", works=False))
     monkeypatch.setattr(speech, "_google_tts", engine("gtts", works=False))
@@ -249,7 +250,45 @@ def test_synthesis_falls_back_and_skips_failed_engines(monkeypatch, tmp_path):
     monkeypatch.setattr(speech, "_system_voice", engine("system", works=False))
     speech._skip_until.clear()
     assert speech.synthesize("Ответ", "ru-RU-SvetlanaNeural", tmp_path) is None
+    assert speech.tts_status().startswith("недоступно (нейросетевой голос Edge TTS: ")
     assert speech.synthesize("```код```", "ru-RU-SvetlanaNeural", tmp_path) is None
+
+
+def test_male_voice_never_silently_becomes_female(monkeypatch, tmp_path):
+    calls = []
+
+    def engine(name, works=True):
+        def run(text, voice, path):
+            calls.append(name)
+            if not works:
+                raise RuntimeError(f"{name} недоступен")
+            path.write_bytes(name.encode())
+
+        return run
+
+    speech._skip_until.clear()
+    monkeypatch.setattr(speech.sys, "platform", "darwin")
+    monkeypatch.setattr(speech, "_edge_tts", engine("edge", works=False))
+    monkeypatch.setattr(speech, "_system_voice", engine("system"))
+    monkeypatch.setattr(speech, "_google_tts", engine("gtts"))
+    path = speech.synthesize("Ответ", "ru-RU-DmitryNeural", tmp_path)
+    assert open(path, "rb").read() == b"system" and calls == ["edge", "system"]
+    assert speech.tts_status().endswith(", мужской голос") and speech.voice_note() == ""
+
+    speech._skip_until.clear()
+    calls.clear()
+    monkeypatch.setattr(speech, "_system_voice", engine("system", works=False))
+    path = speech.synthesize("Ответ", "ru-RU-DmitryNeural", tmp_path)
+    assert open(path, "rb").read() == b"gtts" and calls == ["edge", "system", "gtts"]
+    note = speech.voice_note()
+    assert note.startswith("Мужской голос сейчас недоступен (нейросетевой голос Edge TTS: ")
+    assert "system недоступен" in note and "голос Yuri" in note
+    assert "женский голос" in speech.tts_status() and note in speech.tts_status()
+
+    calls.clear()
+    path = speech.synthesize("Ответ", "ru-RU-SvetlanaNeural", tmp_path)
+    assert open(path, "rb").read() == b"gtts" and calls == ["edge", "gtts"]
+    assert speech.voice_note() == "" and speech.tts_status() == "Google TTS, женский голос"
 
 
 def test_hanging_tts_engine_times_out(monkeypatch, tmp_path):
@@ -269,8 +308,17 @@ def test_edge_tts_gets_timeouts(monkeypatch, tmp_path):
             open(path, "wb").write(b"mp3")
 
     monkeypatch.setattr("edge_tts.Communicate", Communicate)
+    monkeypatch.setattr("urllib.request.getproxies", lambda: {})
     speech._edge_tts("Ответ", "ru-RU-DmitryNeural", tmp_path / "a.mp3")
-    assert seen == {"connect_timeout": 8, "receive_timeout": 20, "voice": "ru-RU-DmitryNeural"}
+    assert seen == {
+        "connect_timeout": 8,
+        "receive_timeout": 20,
+        "proxy": None,
+        "voice": "ru-RU-DmitryNeural",
+    }
+    monkeypatch.setattr("urllib.request.getproxies", lambda: {"https": "http://proxy.local:3128"})
+    speech._edge_tts("Ответ", "ru-RU-DmitryNeural", tmp_path / "a.mp3")
+    assert seen["proxy"] == "http://proxy.local:3128"
 
 
 @pytest.mark.skipif(not shutil.which("espeak-ng"), reason="espeak-ng не установлен")
@@ -283,10 +331,12 @@ def test_system_voice_works_offline(tmp_path):
 def test_system_voice_commands_for_macos_and_windows(monkeypatch, tmp_path):
     commands = []
 
+    voices = "Milena              ru_RU    # Здравствуйте!\nYuri ru_RU # Привет\nAlex en_US # Hi\n"
+    code = {"value": 0}
+
     def run(command, **kwargs):
         commands.append((command, kwargs))
-        out = "Milena              ru_RU    # Здравствуйте!\nYuri ru_RU # Привет\nAlex en_US # Hi\n"
-        return SimpleNamespace(stdout=out)
+        return SimpleNamespace(stdout=voices, returncode=code["value"])
 
     monkeypatch.setattr(speech.subprocess, "run", run)
     monkeypatch.setattr(speech.sys, "platform", "darwin")
@@ -297,11 +347,25 @@ def test_system_voice_commands_for_macos_and_windows(monkeypatch, tmp_path):
     speech._system_voice("Ответ", "ru-RU-SvetlanaNeural", tmp_path / "a.wav")
     assert commands[-1][0][2] == "Milena"
 
+    voices = "Milena ru_RU # Здравствуйте!\nYuri (Enhanced) ru_RU # Привет\nYuri ru_RU # Привет\n"
+    speech._mac_voice.cache_clear()
+    speech._system_voice("Ответ", "ru-RU-DmitryNeural", tmp_path / "a.wav")
+    assert commands[-1][0][2] == "Yuri (Enhanced)"
+    voices = "Milena ru_RU # Здравствуйте!\n"
+    speech._mac_voice.cache_clear()
+    with pytest.raises(RuntimeError, match="нет русского голоса Yuri"):
+        speech._system_voice("Ответ", "ru-RU-DmitryNeural", tmp_path / "a.wav")
+
     monkeypatch.setattr(speech.sys, "platform", "win32")
     speech._system_voice("Ответ", "ru-RU-SvetlanaNeural", tmp_path / "w.wav")
     command, kwargs = commands[-1]
     assert command[0] == "powershell" and "System.Speech" in command[-1]
     assert kwargs["env"]["LM_WAV"].endswith("w.wav") and kwargs["env"]["LM_TEXT"]
+    assert kwargs["env"]["LM_GENDER"] == "Female" and "LM_GENDER" in command[-1]
+    code["value"] = 2
+    with pytest.raises(RuntimeError, match="в Windows нет мужского русского голоса"):
+        speech._system_voice("Ответ", "ru-RU-DmitryNeural", tmp_path / "w.wav")
+    assert commands[-1][1]["env"]["LM_GENDER"] == "Male"
 
 
 def test_web_search_formats_results(monkeypatch):

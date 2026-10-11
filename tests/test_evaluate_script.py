@@ -24,7 +24,7 @@ def test_fact_and_number_matching():
 
 def test_golden_set_is_consistent():
     manuals = {path.name for path in (PROJECT_DIR / "data" / "manuals").iterdir()}
-    assert len(GOLDEN["questions"]) == 15 and len(GOLDEN["routes"]) == 12
+    assert len(GOLDEN["questions"]) == 19 and len(GOLDEN["routes"]) == 12
     assert all(item["source"] in manuals and item["facts"] for item in GOLDEN["questions"])
 
 
@@ -36,10 +36,10 @@ def test_retrieval_finds_expected_manual_first(course_assistant):
 def test_full_evaluation_runs_and_saves_report(course_assistant):
     report = evaluate.evaluate(course_assistant, GOLDEN, k=4)
     assert set(report) == {"retrieval", "routes", "answers", "calculations"}
-    assert len(report["answers"]) == 15 and len(report["calculations"]) == 3
+    assert len(report["answers"]) == 19 and len(report["calculations"]) == 3
     goal = next(row for row in report["answers"] if row["id"] == "lab11-goal")
     assert goal["recall"] > 0 and goal["cited"]
     lines = evaluate.summary(report)
-    assert lines[0].startswith("Поиск: нужная методичка первой (hit@1) 15 из 15")
+    assert lines[0].startswith("Поиск: нужная методичка первой (hit@1) 19 из 19")
     text = evaluate.save_report(report, course_assistant.settings).read_text(encoding="utf-8")
     assert "Точность диспетчера" in text and "## lab11-goal" in text

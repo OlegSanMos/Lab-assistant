@@ -218,6 +218,8 @@ class _Formula:
                 end = self.src.find("]", self.pos)
                 degree, self.pos = self.src[self.pos + 1 : end], end + 1
             return {"3": "∛", "4": "∜"}.get(degree, "√") + _wrap(self.argument())
+        if name == "tag":
+            return f" ({self.argument()})"
         if name in TEXT_COMMANDS:
             return self.argument()
         if name in ACCENTS:

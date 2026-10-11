@@ -17,14 +17,19 @@ from .formulas import latex_to_text
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".ogg", ".oga", ".opus", ".webm", ".m4a", ".aac", ".flac"}
 VOICES = {
-    "Светлана (женский)": "ru-RU-SvetlanaNeural",
-    "Дмитрий (мужской)": "ru-RU-DmitryNeural",
+    "Женский": "ru-RU-SvetlanaNeural",
+    "Мужской": "ru-RU-DmitryNeural",
 }
 MALE_VOICES = {"ru-RU-DmitryNeural"}
 MAX_TTS_CHARS = 700
 SAMPLE_RATE = 16000
 TTS_TIMEOUT = 25
-RETRY_AFTER = 300
+RETRY_AFTER = 60
+MALE_HINTS = {
+    "darwin": "в macOS установите русский голос Yuri: Системные настройки, Универсальный доступ, "
+    "раздел озвучивания текста (Spoken Content), Системный голос, Управлять голосами",
+    "win32": "в Windows установите русский голос Pavel: Параметры, Время и язык, Речь",
+}
 MODEL_MB = {"tiny": 75, "base": 145, "small": 485, "medium": 1530, "large-v3": 3090}
 NO_SPEECH = (
     "Речь не распознана: в записи не слышно слов. Проверьте, что браузеру разрешен доступ к "
@@ -261,7 +266,8 @@ def _short(exc: BaseException) -> str:
 
 
 _skip_until: dict[str, float] = {}
-_tts_state = {"engine": ""}
+_tts_errors: dict[str, str] = {}
+_tts_state = {"engine": "", "voice": ""}
 
 
 def text_for_speech(text: str, limit: int = MAX_TTS_CHARS) -> str:
@@ -285,28 +291,62 @@ def synthesize(text: str, voice: str, out_dir: Path) -> str | None:
     if not clean:
         return None
     out_dir.mkdir(parents=True, exist_ok=True)
-    for name, engine, ext in tts_engines():
-        if time.monotonic() < _skip_until.get(name, 0):
+    _tts_state["voice"] = voice
+    for name, engine, ext in tts_engines(voice):
+        key = f"{name}:{voice}"
+        if time.monotonic() < _skip_until.get(key, 0):
             continue
         path = out_dir / f"answer_{uuid.uuid4().hex[:8]}.{ext}"
-        if try_engine(engine, clean, voice, path) is None:
+        error = try_engine(engine, clean, voice, path)
+        if error is None:
             _tts_state["engine"] = name
+            _tts_errors.pop(key, None)
             return str(path)
-        _skip_until[name] = time.monotonic() + RETRY_AFTER
+        _tts_errors[key] = error
+        _skip_until[key] = time.monotonic() + RETRY_AFTER
+    _tts_state["engine"] = ""
     return None
 
 
-def tts_engines() -> list[tuple]:
-    return [
-        ("edge", _edge_tts, "mp3"),
-        ("gtts", _google_tts, "mp3"),
-        ("system", _system_voice, "wav"),
-    ]
+def tts_engines(voice: str = "") -> list[tuple]:
+    edge = ("edge", _edge_tts, "mp3")
+    google = ("gtts", _google_tts, "mp3")
+    system = ("system", _system_voice, "wav")
+    return [edge, system, google] if voice in MALE_VOICES else [edge, google, system]
+
+
+def male_voice_missing() -> bool:
+    return _tts_state["voice"] in MALE_VOICES and _tts_state["engine"] == "gtts"
+
+
+def _reasons(voice: str, names: tuple[str, ...]) -> str:
+    return "; ".join(
+        f"{TTS_NAMES[name]}: {_tts_errors[f'{name}:{voice}']}"
+        for name in names
+        if f"{name}:{voice}" in _tts_errors
+    )
+
+
+def voice_note() -> str:
+    if not male_voice_missing():
+        return ""
+    hint = MALE_HINTS.get(sys.platform, "установите espeak-ng")
+    return (
+        f"Мужской голос сейчас недоступен ({_reasons(_tts_state['voice'], ('edge', 'system'))}), "
+        f"ответ озвучен женским голосом. Чтобы мужской голос работал и без интернета, {hint}."
+    )
 
 
 def tts_status() -> str:
-    engine = _tts_state["engine"]
-    return TTS_NAMES[engine] if engine else "голос выбирается при первом ответе"
+    engine, voice = _tts_state["engine"], _tts_state["voice"]
+    if not voice:
+        return "голос выбирается при первом ответе"
+    if not engine:
+        return f"недоступно ({_reasons(voice, tuple(TTS_NAMES))})"
+    male = voice in MALE_VOICES and not male_voice_missing()
+    status = f"{TTS_NAMES[engine]}, {'мужской' if male else 'женский'} голос"
+    note = voice_note()
+    return f"{status}. {note}" if note else status
 
 
 def try_engine(engine, text: str, voice: str, path: Path) -> str | None:
@@ -330,10 +370,20 @@ def try_engine(engine, text: str, voice: str, path: Path) -> str | None:
     return None
 
 
+def _proxy() -> str | None:
+    from urllib.request import getproxies
+
+    proxies = getproxies()
+    return proxies.get("https") or proxies.get("http") or None
+
+
 def _edge_tts(text: str, voice: str, path: Path) -> None:
     import edge_tts
 
-    edge_tts.Communicate(text, voice, connect_timeout=8, receive_timeout=20).save_sync(str(path))
+    communicate = edge_tts.Communicate(
+        text, voice, proxy=_proxy(), connect_timeout=8, receive_timeout=20
+    )
+    communicate.save_sync(str(path))
 
 
 def _google_tts(text: str, voice: str, path: Path) -> None:
@@ -353,9 +403,15 @@ def _system_voice(text: str, voice: str, path: Path) -> None:
             command.append("--data-format=LEI16@22050")
             subprocess.run([*command, "-f", file.name], check=True, timeout=TTS_TIMEOUT)
         elif sys.platform == "win32":
-            env = {**os.environ, "LM_TEXT": file.name, "LM_WAV": str(path)}
+            gender = "Male" if male else "Female"
+            env = {**os.environ, "LM_TEXT": file.name, "LM_WAV": str(path), "LM_GENDER": gender}
             command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_TTS]
-            subprocess.run(command, check=True, timeout=TTS_TIMEOUT, env=env)
+            result = subprocess.run(command, timeout=TTS_TIMEOUT, env=env)
+            if result.returncode == 2:
+                kind = "мужского" if male else "женского"
+                raise RuntimeError(f"в Windows нет {kind} русского голоса")
+            if result.returncode:
+                raise RuntimeError(f"PowerShell завершился с кодом {result.returncode}")
         else:
             espeak = shutil.which("espeak-ng") or shutil.which("espeak")
             if not espeak:
@@ -371,16 +427,19 @@ def _system_voice(text: str, voice: str, path: Path) -> None:
 def _mac_voice(male: bool) -> str:
     listing = subprocess.run(["say", "-v", "?"], capture_output=True, text=True, timeout=10)
     names = re.findall(r"^(.+?)\s+ru_RU\s", listing.stdout, flags=re.M)
-    if not names:
-        raise RuntimeError("в системе нет русского голоса")
-    preferred = [n for n in names if (n.split()[0] in ("Yuri", "Юрий")) == male]
-    return (preferred or names)[0]
+    fitting = [n for n in names if (n.split()[0] in ("Yuri", "Юрий")) == male]
+    if not fitting:
+        raise RuntimeError(
+            "в macOS нет русского голоса Yuri" if male else "в macOS нет русского голоса"
+        )
+    return sorted(fitting, key=lambda n: "(" not in n)[0]
 
 
 WINDOWS_TTS = (
     "Add-Type -AssemblyName System.Speech; "
     "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-    "$v = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -eq 'ru-RU' } "
+    "$v = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -eq 'ru-RU' "
+    "-and [string]$_.VoiceInfo.Gender -eq $env:LM_GENDER } "
     "| Select-Object -First 1; if (-not $v) { exit 2 }; "
     "$s.SelectVoice($v.VoiceInfo.Name); $s.SetOutputToWaveFile($env:LM_WAV); "
     "$s.Speak([IO.File]::ReadAllText($env:LM_TEXT, [Text.Encoding]::UTF8)); $s.Dispose()"

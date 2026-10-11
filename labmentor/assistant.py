@@ -27,7 +27,7 @@ from .graphics import draw_flowchart, plot_fit
 from .knowledge import DOC_EXTENSIONS, KnowledgeBase, format_docs
 from .llm import create_chat_model, create_embeddings
 from .memory import ConversationMemory, plan_context
-from .report import export_report_docx
+from .report import export_report_docx, report_inserts
 from .speech import AUDIO_EXTENSIONS, SpeechError, synthesize, transcribe
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
@@ -438,6 +438,7 @@ class LabAssistant:
                 "manual": self.manual_text(options.lab),
                 "notes": notes or "нет",
                 "results": session.data.last_results or "обработка данных не выполнялась",
+                "inserts": report_inserts(session.data.df, session.data.last_plot),
             }
         )
         path = export_report_docx(

@@ -23,6 +23,11 @@ def chat_text(chat: list) -> str:
     return "\n".join(parts)
 
 
+def audio_path(update: dict) -> str | None:
+    assert update["playback_position"] == 0
+    return update["value"]
+
+
 def has_image(chat: list) -> bool:
     return any(
         isinstance(item, dict) and item.get("type") == "file"
@@ -78,7 +83,7 @@ def test_rag_question_through_server(client):
     outputs = send(client, "Какова цель лабораторной работы № 1?")
     chat, _, audio, context, *_ = outputs[-1]
     assert len(outputs) > 2
-    assert audio is None
+    assert audio_path(audio) is None
     text = chat_text(chat)
     assert "Цель работы: проверить закон Ома" in text
     assert "🧭 Диспетчер" in text and "📚 Использованные фрагменты методичек" in text
@@ -155,7 +160,7 @@ def test_voice_question_gets_spoken_answer(client, monkeypatch, tmp_path):
     chat, _, audio = outputs[-1][:3]
     assert f"🎤 {question}" in chat_text(chat)
     assert "Цель работы: проверить закон Ома" in chat_text(chat)
-    assert audio and audio.endswith(".wav")
+    assert audio_path(audio).endswith(".wav")
     assert spoken[0].startswith("Цель работы")
     status, _ = client.predict(api_name="/on_speech_status")
     assert status.startswith("Запишите вопрос") and "Распознавание речи:" in status
@@ -178,7 +183,7 @@ def test_check_voice_button(client, monkeypatch, tmp_path):
         "labmentor.assistant.synthesize", lambda text, voice, out: str(make_wav(tmp_path / "a.wav"))
     )
     audio, status = client.predict("ru-RU-SvetlanaNeural", api_name="/on_check_voice")
-    assert audio.endswith(".wav") and "Озвучивание:" in status
+    assert audio_path(audio).endswith(".wav") and "Озвучивание:" in status
 
 
 @pytest.mark.parametrize("provider", ["ollama", "openai"])

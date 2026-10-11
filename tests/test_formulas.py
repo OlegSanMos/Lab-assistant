@@ -20,6 +20,7 @@ def test_latex_to_text_common_formulas():
         r"$u(t) = U_0 e^{-t/\tau}$, $\ln 2 \approx 0{,}693$": "u(t) = U₀ e^(-t/τ), ln 2 ≈ 0,693",
         r"$a = \sqrt[3]{V}$, $\vec{F} = m\vec{a}$": "a = ∛V, F⃗ = ma⃗",
         r"$$\begin{aligned} U &= I R \\ P &= U I \end{aligned}$$": "\nU = I R; P = U I\n",
+        r"$$U = I R \tag{2}$$": "\nU = I R (2)\n",
         r"$\left. \frac{dU}{dt} \right|_{t=0} = -\frac{U_0}{\tau}$": "dU/dt |ₜ₌₀ = -U₀/τ",
     }
     for latex, text in cases.items():
@@ -55,8 +56,8 @@ def test_docx_report_formulas_with_indices(tmp_path):
     )
     document = Document(export_report_docx(markdown, "ЛР 1", tmp_path))
     texts = [p.text for p in document.paragraphs]
-    assert "Закон Ома: R = U/I." in texts and "Rср = 101,5 Ом, τ = 10-3 с" in texts
-    runs = next(p for p in document.paragraphs if p.text.startswith("Rср")).runs
+    assert "Закон Ома: R = U/I." in texts and "\tRср = 101,5 Ом, τ = 10-3 с\t(1)" in texts
+    runs = next(p for p in document.paragraphs if p.text.startswith("\tRср")).runs
     assert [r.text for r in runs if r.font.subscript] == ["ср"]
     assert [r.text for r in runs if r.font.superscript] == ["-3"]
     runs = next(p for p in document.paragraphs if p.text.startswith("Итог")).runs

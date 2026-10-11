@@ -10,7 +10,14 @@ from .config import DEFAULT_MODELS, PROJECT_DIR, Settings
 from .data_analysis import add_column, parse_column_spec
 from .formulas import LATEX_DELIMITERS, prettify_math
 from .llm import PROVIDERS
-from .speech import AUDIO_EXTENSIONS, VOICES, stt_loading, stt_status, tts_status
+from .speech import (
+    AUDIO_EXTENSIONS,
+    VOICES,
+    stt_loading,
+    stt_status,
+    tts_status,
+    voice_note,
+)
 
 TITLE = "ЛабМентор"
 SUBTITLE = "виртуальный ассистент лабораторного практикума по инженерным дисциплинам"
@@ -54,6 +61,10 @@ ABOUT = """
 ### Модели
 OpenAI-совместимый API или открытые LLM через Ollama (Qwen2.5, Llama 3.1, Gemma 3).
 """
+
+
+def fresh_audio(path: str | None):
+    return gr.Audio(value=path, playback_position=0)
 
 
 def make_options(
@@ -199,7 +210,10 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 kb_info = gr.Markdown(assistant.kb.describe())
             with gr.Accordion("🎙️ Голос, интернет, защита", open=False):
                 speak = gr.Checkbox(False, label="Озвучивать и ответы на вопросы, заданные текстом")
-                voice = gr.Dropdown(list(VOICES.items()), value=settings.tts_voice, label="Голос")
+                voices = list(VOICES.items())
+                if settings.tts_voice not in VOICES.values():
+                    voices.append((settings.tts_voice, settings.tts_voice))
+                voice = gr.Radio(voices, value=settings.tts_voice, label="Голос озвучки")
                 check_voice = gr.Button("🔊 Проверить голос", size="sm")
                 allow_web = gr.Checkbox(True, label="Разрешить поиск в интернете")
                 exam_n = gr.Slider(3, 10, 5, step=1, label="Число вопросов на защите")
@@ -305,7 +319,13 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             files = (message or {}).get("files") or []
             if any(Path(f).suffix.lower() in AUDIO_EXTENSIONS for f in files):
                 listening = {"role": "assistant", "content": "🎤 Распознаю речь..."}
-                yield [*history, listening], "busy", None, *context_outputs(sess), *[gr.skip()] * 4
+                yield (
+                    [*history, listening],
+                    "busy",
+                    fresh_audio(None),
+                    *context_outputs(sess),
+                    *[gr.skip()] * 4,
+                )
             text = ((message or {}).get("text") or "").strip()
             got = assistant.ingest(sess, files)
             tables = (
@@ -336,15 +356,22 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                     audio = assistant.speak(
                         "Не удалось распознать вопрос, подробности на экране.", voice_id
                     )
-                yield history, "ready", audio, *context_outputs(sess), *tables
+                yield history, "ready", fresh_audio(audio), *context_outputs(sess), *tables
                 return
             reply = Reply()
+            audio = fresh_audio(None)
             for reply in assistant.respond(sess, question, options, got.image):
-                yield history + render(reply), "busy", gr.skip(), *context_outputs(sess), *tables
-                tables = [gr.skip()] * 4
+                yield history + render(reply), "busy", audio, *context_outputs(sess), *tables
+                audio, tables = gr.skip(), [gr.skip()] * 4
             voiced = (speak_on or bool(got.speech)) and not reply.error
             audio = assistant.speak(reply.text, voice_id) if voiced else None
-            yield history + render(reply), "ready", audio, *context_outputs(sess), *tables
+            yield (
+                history + render(reply),
+                "ready",
+                fresh_audio(audio),
+                *context_outputs(sess),
+                *tables,
+            )
             if assistant.update_memory(sess, options):
                 yield gr.skip(), None, gr.skip(), *context_outputs(sess), *tables
 
@@ -373,7 +400,9 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             path = assistant.speak("Голос ЛабМентора работает. Задайте вопрос голосом.", voice_id)
             if path is None:
                 gr.Warning(NO_VOICE)
-            return path, on_speech_status()[0]
+            elif voice_note():
+                gr.Warning(voice_note())
+            return fresh_audio(path), on_speech_status()[0]
 
         dialog_outputs = [answer_audio, context_info, summary_box, *data_outputs]
         chat_input.submit(
@@ -398,7 +427,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
         def on_clear(sess):
             sess.memory.clear()
             sess.exam = None
-            return [], None, *context_outputs(sess)
+            return [], fresh_audio(None), *context_outputs(sess)
 
         clear_btn.click(on_clear, session, [chatbot, answer_audio, context_info, summary_box])
         chatbot.clear(on_clear, session, [chatbot, answer_audio, context_info, summary_box])

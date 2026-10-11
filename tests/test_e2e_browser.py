@@ -1,4 +1,5 @@
 import socket
+import time
 
 import pytest
 
@@ -9,6 +10,24 @@ from labmentor.ui import INPUT_HINT, build_ui, launch_options
 
 sync_api = pytest.importorskip("playwright.sync_api")
 INPUT = INPUT_HINT
+TRACK_AUDIO = """
+window.__audio = {elements: [], starts: [], ended: 0};
+const create = document.createElement.bind(document);
+document.createElement = (tag, ...rest) => {
+  const element = create(tag, ...rest);
+  if (String(tag).toLowerCase() === "audio") {
+    window.__audio.elements.push(element);
+    element.addEventListener("playing", () => {
+      const src = element.currentSrc;
+      if (!window.__audio.starts.some((start) => start.src === src)) {
+        window.__audio.starts.push({src, time: element.currentTime});
+      }
+    });
+    element.addEventListener("ended", () => (window.__audio.ended += 1));
+  }
+  return element;
+};
+"""
 
 
 @pytest.fixture(scope="module")
@@ -40,6 +59,7 @@ def app_url(tmp_path_factory):
 def browser(tmp_path_factory):
     microphone = make_wav(tmp_path_factory.mktemp("mic") / "mic.wav", seconds=3)
     media = [
+        "--autoplay-policy=no-user-gesture-required",
         "--use-fake-ui-for-media-stream",
         "--use-fake-device-for-media-stream",
         f"--use-file-for-fake-audio-capture={microphone}",
@@ -163,3 +183,50 @@ def test_voice_question_by_microphone(page, monkeypatch, tmp_path):
     spoken = page.locator("#voice-answer a[download]")
     sync_api.expect(spoken).to_have_attribute("download", "answer.wav")
     sync_api.expect(recorder.get_by_role("button", name="Record").first).to_be_visible()
+
+
+def ask_by_voice(page):
+    recorder = page.locator("#voice-input")
+    record = recorder.get_by_role("button", name="Record").first
+    record.wait_for(timeout=30_000)
+    record.click()
+    page.wait_for_timeout(1200)
+    recorder.get_by_role("button", name="Stop").first.click()
+
+
+def start_time(page, number):
+    page.wait_for_function("n => window.__audio.starts.length >= n", arg=number, timeout=30_000)
+    return page.evaluate("n => window.__audio.starts[n - 1].time", number)
+
+
+def test_new_spoken_answer_starts_from_beginning(browser, app_url, monkeypatch, tmp_path):
+    answers = []
+
+    def speak(text, voice, out_dir):
+        if len(answers) == 1:
+            time.sleep(3)
+        answers.append(make_wav(tmp_path / f"answer_{len(answers) + 1}.wav", seconds=6))
+        return str(answers[-1])
+
+    question = "Какова цель лабораторной работы № 1?"
+    monkeypatch.setattr("labmentor.assistant.transcribe", lambda path, settings: question)
+    monkeypatch.setattr("labmentor.assistant.synthesize", speak)
+    page = browser.new_page(viewport={"width": 1440, "height": 1000})
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script(TRACK_AUDIO)
+    page.goto(app_url, wait_until="domcontentloaded")
+    page.get_by_text("Голос, интернет, защита").first.click()
+    page.get_by_label("Озвучивать и ответы на вопросы, заданные текстом").check()
+    ask(page, question)
+    assert start_time(page, 1) < 0.5
+    page.wait_for_timeout(1500)
+    sync_api.expect(page.get_by_placeholder(INPUT)).to_be_editable(timeout=30_000)
+    ask(page, "А какое оборудование нужно?")
+    page.wait_for_function("() => window.__audio.elements.every(a => a.paused)", timeout=1500)
+    assert start_time(page, 2) < 0.5
+    page.wait_for_function("() => window.__audio.ended >= 1", timeout=15_000)
+    ask_by_voice(page)
+    assert start_time(page, 3) < 0.5
+    assert len(answers) == 3 and errors == [], f"Ошибки JavaScript на странице: {errors}"
+    page.close()
