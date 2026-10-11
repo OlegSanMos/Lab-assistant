@@ -11,11 +11,11 @@ sys.path.insert(0, str(ROOT))
 
 from labmentor.assistant import LabAssistant, Options, Reply
 from labmentor.config import Settings, use_system_certificates
+from labmentor.data_analysis import add_column, parse_column_spec
 from labmentor.llm import check_setup
 from labmentor.speech import synthesize, transcribe
 
 SAMPLES = ROOT / "data" / "samples"
-LAB_1 = "Лабораторная работа № 1. Проверка закона Ома для участка цепи"
 
 
 @dataclass
@@ -24,6 +24,10 @@ class Result:
     ok: bool
     seconds: float
     details: str
+
+
+def lab_title(assistant: LabAssistant, number: str) -> str:
+    return next((title for title in assistant.lab_titles() if f"работа {number}." in title), "")
 
 
 def ask(assistant: LabAssistant, session, question: str, image: str | None = None, **opts) -> Reply:
@@ -41,10 +45,10 @@ def scenario_chat(assistant):
 
 def scenario_router(assistant):
     cases = {
-        "Какое оборудование нужно для работы № 2?": "manual",
-        "Найди в интернете плотность меди": "research",
+        "Какое оборудование нужно для работы 1.2?": "manual",
+        "Найди в интернете типичное напряжение Эрли маломощного транзистора": "research",
         "Задай мне контрольные вопросы для защиты": "exam",
-        "Нарисуй блок-схему порядка выполнения работы": "flowchart",
+        "Нарисуй блок-схему порядка выполнения работы 1.4": "flowchart",
     }
     hits = [
         assistant.choose_route(assistant.new_session(), q, Options(), None) == r
@@ -56,19 +60,20 @@ def scenario_router(assistant):
 
 def scenario_rag(assistant):
     reply = ask(
-        assistant, assistant.new_session(), "Какова цель лабораторной работы № 1?", mode="manual"
+        assistant, assistant.new_session(), "Какова цель лабораторной работы 1.1?", mode="manual"
     )
-    assert any("№ 1" in s for s in reply.sources), "нет источника из ЛР 1"
+    assert any("1.1." in s for s in reply.sources), "нет источника из работы 1.1"
     return reply.text
 
 
 def scenario_data_agent(assistant):
     session = assistant.new_session()
-    assistant.load_table(session, SAMPLES / "ohm_law.csv")
+    assistant.load_table(session, SAMPLES / "diode_iv.csv")
     reply = ask(
         assistant,
         session,
-        "Построй график I(U) и найди сопротивление резистора с погрешностью",
+        "Построй ВАХ диода и найди коэффициент неидеальности m: "
+        "линеаризуй через ln I и примени МНК, тепловой потенциал 25 мВ",
         mode="data",
     )
     tools = [step["title"] for step in reply.steps]
@@ -81,7 +86,7 @@ def scenario_research_agent(assistant):
     reply = ask(
         assistant,
         assistant.new_session(),
-        "Найди в интернете модуль Юнга стали 45 и сравни с методичкой",
+        "Найди в интернете типичное напряжение Эрли маломощного транзистора и сравни с методичкой",
         mode="research",
     )
     tools = [step["title"].split()[-1] for step in reply.steps[1:]]
@@ -93,7 +98,7 @@ def scenario_flowchart(assistant):
     reply = ask(
         assistant,
         assistant.new_session(),
-        "Нарисуй блок-схему порядка выполнения работы № 3",
+        "Нарисуй блок-схему порядка выполнения работы 1.3",
         mode="flowchart",
     )
     assert reply.images, "схема не построена"
@@ -112,12 +117,12 @@ def scenario_vision(assistant):
 
 def scenario_exam(assistant):
     session = assistant.new_session()
-    first = ask(assistant, session, "Проверь меня по работе 1", mode="exam", exam_questions=3)
+    first = ask(assistant, session, "Проверь меня по работе 1.1", mode="exam", exam_questions=3)
     assert session.exam is not None, "вопросы не сгенерированы"
     second = ask(
         assistant,
         session,
-        "Ток прямо пропорционален напряжению и обратно пропорционален сопротивлению",
+        "Прямая ветвь ВАХ диода описывается экспонентой, ток насыщения задает параметр IS",
         mode="exam",
     )
     assert "/10" in second.text, "нет оценки ответа"
@@ -126,7 +131,7 @@ def scenario_exam(assistant):
 
 def scenario_context(assistant):
     session = assistant.new_session()
-    question = "Расскажи подробно о порядке выполнения лабораторной работы № 2. " * 3
+    question = "Расскажи подробно о порядке выполнения лабораторной работы 1.2. " * 3
     for _ in range(3):
         ask(assistant, session, question, mode="manual", history_tokens=256)
     assert assistant.update_memory(session, Options()), "резюме не построено"
@@ -135,9 +140,11 @@ def scenario_context(assistant):
 
 def scenario_report(assistant):
     session = assistant.new_session()
-    assistant.load_table(session, SAMPLES / "ohm_law.csv")
-    assistant.analyze(session, "U_В", "I_мА", 1, 0.95, None)
-    markdown, path = assistant.make_report(session, Options(lab=LAB_1), "Опыт при 22 °C")
+    assistant.load_table(session, SAMPLES / "diode_iv.csv")
+    column = add_column(session.data.df, *parse_column_spec("ln_I = ln(I_мА)"))
+    assistant.analyze(session, "U_В", column, 1, 0.95, None)
+    options = Options(lab=lab_title(assistant, "1.1"))
+    markdown, path = assistant.make_report(session, options, "Опыт при 22 °C")
     assert "Вывод" in markdown, "в отчете нет выводов"
     return path
 
@@ -145,7 +152,7 @@ def scenario_report(assistant):
 def scenario_speech(assistant):
     out = assistant.settings.output_dir
     audio = synthesize(
-        "Какова цель лабораторной работы номер один?", assistant.settings.tts_voice, out
+        "Какова цель лабораторной работы по стабилитрону?", assistant.settings.tts_voice, out
     )
     assert audio, "синтез речи недоступен (нужен интернет)"
     text = transcribe(audio, assistant.settings)

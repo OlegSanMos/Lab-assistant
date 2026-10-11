@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import wave
 from pathlib import Path
@@ -17,6 +18,8 @@ from labmentor.assistant import LabAssistant
 from labmentor.config import PROJECT_DIR, Settings
 
 SAMPLES = PROJECT_DIR / "data" / "samples"
+DEMO_MANUALS = PROJECT_DIR / "tests" / "data" / "manuals"
+FRAGMENT = re.compile(r"\[([^\]\n]+)\]\n(.+?)(?=\n\n\[[^\]\n]+\]\n|\Z)", re.S)
 
 
 class ScriptedChatModel(BaseChatModel):
@@ -138,12 +141,22 @@ def lab_responder(messages: list[BaseMessage]) -> AIMessage | str:
     return "Здравствуйте! Чем помочь?"
 
 
+def course_responder(messages: list[BaseMessage]) -> AIMessage | str:
+    system = messages[0].text if messages else ""
+    if "Отвечай на основе фрагментов методических указаний" in system:
+        match = FRAGMENT.search(system.split("Фрагменты методических указаний:", 1)[-1])
+        if match:
+            return f"{match.group(2).strip()} [{match.group(1)}]"
+    return lab_responder(messages)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(
         provider="openai",
         openai_api_key="test-key",
         embeddings_provider="none",
+        manuals_dir=DEMO_MANUALS,
         storage_dir=tmp_path,
     )
 
@@ -156,6 +169,18 @@ def scripted_llm() -> ScriptedChatModel:
 @pytest.fixture
 def assistant(settings: Settings, scripted_llm: ScriptedChatModel) -> LabAssistant:
     return LabAssistant(settings, llm_factory=lambda **kwargs: scripted_llm)
+
+
+@pytest.fixture
+def course_assistant(tmp_path: Path) -> LabAssistant:
+    settings = Settings(
+        provider="openai",
+        openai_api_key="test-key",
+        embeddings_provider="none",
+        storage_dir=tmp_path,
+    )
+    llm = ScriptedChatModel(responder=course_responder)
+    return LabAssistant(settings, llm_factory=lambda **kwargs: llm)
 
 
 @pytest.fixture

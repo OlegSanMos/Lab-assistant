@@ -62,10 +62,18 @@ def oscillogram() -> None:
     plt.close(fig)
 
 
+def diode() -> None:
+    u = np.arange(0.40, 0.701, 0.02) + rng.normal(0, 0.001, 16)
+    i_ma = 2.52e-6 * (np.exp(u / (1.8 * 0.025)) - 1) * (1 + rng.normal(0, 0.01, 16))
+    df = pd.DataFrame({"U, В": u.round(3), "I, мА": i_ma.round(4)})
+    df.to_csv(SAMPLES / "diode_iv.csv", sep=";", decimal=",", index=False, encoding="utf-8-sig")
+
+
 if __name__ == "__main__":
     SAMPLES.mkdir(parents=True, exist_ok=True)
     ohm_law()
     young_modulus()
     rc_discharge()
     oscillogram()
+    diode()
     print("Демонстрационные данные сохранены в", SAMPLES)

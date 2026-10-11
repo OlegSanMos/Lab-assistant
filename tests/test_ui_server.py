@@ -3,7 +3,7 @@ import socket
 import pytest
 from gradio_client import Client, handle_file
 
-from conftest import SAMPLES, ScriptedChatModel, lab_responder, make_wav
+from conftest import DEMO_MANUALS, SAMPLES, ScriptedChatModel, lab_responder, make_wav
 from labmentor.assistant import LabAssistant
 from labmentor.config import Settings
 from labmentor.speech import SpeechError
@@ -56,6 +56,7 @@ def client(tmp_path_factory):
         provider="openai",
         openai_api_key="test-key",
         embeddings_provider="none",
+        manuals_dir=DEMO_MANUALS,
         storage_dir=tmp_path_factory.mktemp("ui"),
     )
     llm = ScriptedChatModel(responder=lab_responder)
@@ -188,6 +189,7 @@ def test_app_starts_with_real_model_client(provider, tmp_path):
         openai_api_key="test-key",
         openai_base_url=f"{url}/v1",
         ollama_base_url=url,
+        manuals_dir=DEMO_MANUALS,
         storage_dir=tmp_path,
     )
     llm = ScriptedChatModel(responder=lab_responder)

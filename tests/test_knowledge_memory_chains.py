@@ -5,10 +5,10 @@ from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.runnables import RunnableLambda
 
 from labmentor import chains
-from labmentor.knowledge import KnowledgeBase, load_file, tokenize
+from labmentor.knowledge import KnowledgeBase, lab_number, load_file, same_lab, tokenize
 from labmentor.memory import ConversationMemory
 
-MANUALS = Path(__file__).resolve().parent.parent / "data" / "manuals"
+MANUALS = Path(__file__).resolve().parent / "data" / "manuals"
 
 
 def test_tokenize_uses_russian_stemming():
@@ -27,6 +27,29 @@ def test_bm25_search_finds_relevant_manual():
     assert {d.metadata["source"] for d in kb.search("цель лабораторной работы № 1", 3)} == {
         "lr1_ohm_law.md"
     }
+
+
+def test_lab_numbers_in_old_and_new_titles():
+    assert lab_number("Лабораторная работа № 2. Определение модуля упругости стали") == "2"
+    assert lab_number("Лабораторная работа 1.3. Изучение статических характеристик") == "1.3"
+    assert lab_number("Требования к оформлению отчета") == ""
+    assert same_lab("1.3", "1.3") and same_lab("3", "1.3") and same_lab("2", "2")
+    assert not same_lab("1.3", "1.2") and not same_lab("1.3", "3") and not same_lab("1", "")
+
+
+def test_search_prefers_lab_by_new_style_number(tmp_path):
+    topics = {"11": "диода", "12": "биполярного транзистора", "13": "МОП-транзистора"}
+    for number, topic in topics.items():
+        (tmp_path / f"lab_{number}.md").write_text(
+            f"# Лабораторная работа 1.{number[1]}. Изучение характеристик {topic}\n\n"
+            "## Цели работы\nИзучение статических характеристик и параметров модели.\n",
+            encoding="utf-8",
+        )
+    kb = KnowledgeBase(None)
+    kb.add_directory(tmp_path)
+    assert {c.metadata["lab"] for c in kb.chunks} == {"1.1", "1.2", "1.3"}
+    assert kb.search("Какова цель лабораторной работы 1.2?", 1)[0].metadata["source"] == "lab_12.md"
+    assert kb.search("цели работы 3", 1)[0].metadata["source"] == "lab_13.md"
 
 
 def test_hybrid_search_with_embeddings_and_retriever():

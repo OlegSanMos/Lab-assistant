@@ -18,7 +18,20 @@ DOC_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 _stemmers = {"ru": snowballstemmer.stemmer("russian"), "en": snowballstemmer.stemmer("english")}
 _word_re = re.compile(r"\w+", re.UNICODE)
 _cyrillic_re = re.compile("[а-яё]")
-_lab_number_re = re.compile(r"(?:\bлр|работ\w*)\s*[-№]?\s*(?:номер\s*)?(\d+)", re.IGNORECASE)
+_lab_number_re = re.compile(
+    r"(?:\bлр|работ\w*)\s*[-№]?\s*(?:номер\s*)?(\d+(?:\.\d+)?)", re.IGNORECASE
+)
+
+
+def lab_number(title: str) -> str:
+    match = _lab_number_re.search(title)
+    return match.group(1) if match else ""
+
+
+def same_lab(asked: str, number: str) -> bool:
+    if not number:
+        return False
+    return asked == number or ("." not in asked and number.rsplit(".", 1)[-1] == asked)
 
 
 def tokenize(text: str) -> list[str]:
@@ -101,9 +114,10 @@ class KnowledgeBase:
             self.chunks = [c for c in self.chunks if c.metadata["source"] != path.name]
             title = self._title(docs[0].page_content, path)
             self.titles[path.name] = title
+            lab = lab_number(title)
             chunks = self.splitter.split_documents(docs)
             for number, chunk in enumerate(chunks, start=1):
-                chunk.metadata.update(title=title, chunk=number)
+                chunk.metadata.update(title=title, chunk=number, lab=lab)
                 if title not in chunk.page_content[: len(title) + 4]:
                     chunk.page_content = f"{title}\n{chunk.page_content}"
             new_chunks += chunks
@@ -130,7 +144,7 @@ class KnowledgeBase:
     def _title(text: str, path: Path) -> str:
         for line in text.splitlines():
             if line.strip():
-                return line.strip("# ").strip()[:120]
+                return line.strip("# ").strip()[:200]
         return path.stem
 
     def search(self, query: str, k: int = 4) -> list[Document]:
@@ -148,7 +162,7 @@ class KnowledgeBase:
             wanted = {
                 i
                 for i, c in enumerate(self.chunks)
-                if any(f"№ {n}." in c.metadata.get("title", "") for n in numbers)
+                if any(same_lab(n, c.metadata.get("lab", "")) for n in numbers)
             }
             rankings.append([i for i in bm25_rank if i in wanted] + sorted(wanted - set(bm25_rank)))
         if self.vector_store is not None:

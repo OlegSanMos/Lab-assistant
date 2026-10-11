@@ -2,7 +2,7 @@ import socket
 
 import pytest
 
-from conftest import SAMPLES, ScriptedChatModel, lab_responder, make_wav
+from conftest import DEMO_MANUALS, SAMPLES, ScriptedChatModel, lab_responder, make_wav
 from labmentor.assistant import LabAssistant
 from labmentor.config import Settings
 from labmentor.ui import INPUT_HINT, build_ui, launch_options
@@ -17,6 +17,7 @@ def app_url(tmp_path_factory):
         provider="openai",
         openai_api_key="test-key",
         embeddings_provider="none",
+        manuals_dir=DEMO_MANUALS,
         storage_dir=tmp_path_factory.mktemp("e2e"),
     )
     llm = ScriptedChatModel(responder=lab_responder)

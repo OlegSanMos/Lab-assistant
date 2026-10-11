@@ -28,18 +28,18 @@ def test_golden_set_is_consistent():
     assert all(item["source"] in manuals and item["facts"] for item in GOLDEN["questions"])
 
 
-def test_retrieval_finds_expected_manual_first(assistant):
-    rows = evaluate.eval_retrieval(assistant, GOLDEN["questions"], k=4)
+def test_retrieval_finds_expected_manual_first(course_assistant):
+    rows = evaluate.eval_retrieval(course_assistant, GOLDEN["questions"], k=4)
     assert all(row["top1"] for row in rows), [row for row in rows if not row["top1"]]
 
 
-def test_full_evaluation_runs_and_saves_report(assistant):
-    report = evaluate.evaluate(assistant, GOLDEN, k=4)
+def test_full_evaluation_runs_and_saves_report(course_assistant):
+    report = evaluate.evaluate(course_assistant, GOLDEN, k=4)
     assert set(report) == {"retrieval", "routes", "answers", "calculations"}
     assert len(report["answers"]) == 15 and len(report["calculations"]) == 3
-    goal = next(row for row in report["answers"] if row["id"] == "lr1-goal")
+    goal = next(row for row in report["answers"] if row["id"] == "lab11-goal")
     assert goal["recall"] > 0 and goal["cited"]
     lines = evaluate.summary(report)
     assert lines[0].startswith("Поиск: нужная методичка первой (hit@1) 15 из 15")
-    text = evaluate.save_report(report, assistant.settings).read_text(encoding="utf-8")
-    assert "Точность диспетчера" in text and "## lr1-goal" in text
+    text = evaluate.save_report(report, course_assistant.settings).read_text(encoding="utf-8")
+    assert "Точность диспетчера" in text and "## lab11-goal" in text
