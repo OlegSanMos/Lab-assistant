@@ -1,9 +1,20 @@
+import re
 import socket
 
 import pytest
+import requests
+from docx import Document
 from gradio_client import Client, handle_file
+from PIL import Image
 
-from conftest import DEMO_MANUALS, SAMPLES, ScriptedChatModel, lab_responder, make_wav
+from conftest import (
+    DEMO_MANUALS,
+    SAMPLES,
+    ScriptedChatModel,
+    lab_responder,
+    make_video,
+    make_wav,
+)
 from labmentor.assistant import LabAssistant
 from labmentor.config import Settings
 from labmentor.speech import SpeechError
@@ -86,7 +97,7 @@ def test_rag_question_through_server(client):
     assert audio_path(audio) is None
     text = chat_text(chat)
     assert "Цель работы: проверить закон Ома" in text
-    assert "🧭 Диспетчер" in text and "📚 Использованные фрагменты методичек" in text
+    assert "Диспетчер" in text and "Использованные фрагменты методичек" in text
     assert "Сообщений в окне:** 2 из 2" in context
 
 
@@ -94,12 +105,27 @@ def test_file_without_question_is_read_and_summarized(client, tmp_path):
     netlist = tmp_path / "amp.cir"
     netlist.write_text("* Инвертирующий усилитель\nR1 in n1 10k\n.end\n", encoding="utf-8")
     outputs = send(client, "", files=[netlist])
-    assert "📎 Читаю файлы: amp.cir..." in chat_text(outputs[0][0])
+    assert "Читаю файлы: amp.cir..." in chat_text(outputs[0][0])
     chat, _, audio, context, *_ = outputs[-1]
     text = chat_text(chat)
-    assert "📎 amp.cir" in text and "База знаний пополнена: amp.cir: 1 фрагм." in text
+    assert "Файл: amp.cir" in text and "База знаний пополнена: amp.cir: 1 фрагм." in text
     assert "Цель работы: проверить закон Ома" in text
     assert "Файлы в памяти диалога:** amp.cir" in context
+
+
+def test_video_without_question_is_watched(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "labmentor.assistant.transcribe", lambda path, settings: "Включаю генератор"
+    )
+    outputs = send(client, "", files=[make_video(tmp_path / "opyt.mp4")])
+    assert "Читаю файлы: opyt.mp4..." in chat_text(outputs[0][0])
+    chat, _, audio, context, *_ = outputs[-1]
+    text = chat_text(chat)
+    assert "Видео: opyt.mp4" in text and "Файл: opyt.mp4" not in text
+    assert "раскадровка из 6 кадров отправлена модели; речь: «Включаю генератор»" in text
+    assert "Исполнитель: Анализ изображений и видео" in text and "tau около 1 с" in text
+    assert has_image(chat) and audio_path(audio) is None
+    assert re.search(r"Файлы в памяти диалога:\*\* [^\n]*opyt\.mp4", context)
 
 
 def test_table_attachment_and_data_agent(client):
@@ -109,7 +135,7 @@ def test_table_attachment_and_data_agent(client):
     chat = outputs[-1][0]
     text = chat_text(chat)
     assert "Загружена таблица ohm_law.csv: 14 строк" in text
-    assert "🔧 Инструмент fit_dependency" in text and has_image(chat)
+    assert "Инструмент fit_dependency" in text and has_image(chat)
     table, x_col, y_col = next(o[5:8] for o in outputs if "headers" in (o[5] or {}))
     assert table["headers"] == ["U_В", "I_мА"] and len(table["data"]) == 14
     assert (x_col["value"], y_col["value"]) == ("U_В", "I_мА")
@@ -130,7 +156,7 @@ def test_exam_dialog(client):
     assert "Вопрос 1 из 2" in text and "8/10" in text and "Итог тренировочной защиты" in text
 
 
-def test_data_tab_endpoints(client):
+def test_data_tab_endpoints(client, tmp_path):
     table, x_col, y_col, stat, note = client.predict(
         handle_file(str(SAMPLES / "ohm_law.csv")), api_name="/on_table"
     )
@@ -142,8 +168,24 @@ def test_data_tab_endpoints(client):
     plot, results = client.predict("U_В", "I_мА", 1, 0.95, "R_Ом", api_name="/on_analyze")
     assert plot.endswith(".png")
     assert "R² = 0.9999" in results and "Результат: R_Ом = 101.34 ± 0.32, P = 0.95" in results
-    report, markdown = client.predict("Опыт при 22 °C", *OPTIONS[:-1], LAB_1, api_name="/on_report")
+    photo = tmp_path / "setup.png"
+    Image.new("RGB", (60, 40), "red").save(photo)
+    report, markdown = client.predict(
+        "Опыт при 22 °C",
+        [handle_file(str(photo))],
+        "Фото установки",
+        *OPTIONS[:-1],
+        LAB_1,
+        api_name="/on_report",
+    )
     assert report.endswith(".docx") and "## Выводы" in markdown
+    assert "Рисунок 1. Экспериментальная" in markdown and "Рисунок 2. Фото установки" in markdown
+    urls = re.findall(r"\]\((/gradio_api/file=[^)]+)\)", markdown)
+    pictures = [requests.get(client.src.rstrip("/") + url, timeout=10) for url in urls]
+    assert len(urls) == 2 and all(
+        r.status_code == 200 and r.content[:4] == b"\x89PNG" for r in pictures
+    )
+    assert len(Document(report).inline_shapes) == 2
 
 
 def test_context_window_controls(client):
@@ -168,9 +210,9 @@ def test_voice_question_gets_spoken_answer(client, monkeypatch, tmp_path):
     job = client.submit(recording, [], "ru-RU-DmitryNeural", *OPTIONS, api_name="/on_voice")
     job.result()
     outputs = job.outputs()
-    assert "🎤 Распознаю речь..." in chat_text(outputs[0][0])
+    assert "Распознаю речь..." in chat_text(outputs[0][0])
     chat, _, audio = outputs[-1][:3]
-    assert f"🎤 {question}" in chat_text(chat)
+    assert f"Голосом: {question}" in chat_text(chat)
     assert "Цель работы: проверить закон Ома" in chat_text(chat)
     assert audio_path(audio).endswith(".wav")
     assert spoken[0].startswith("Цель работы")
@@ -187,7 +229,7 @@ def test_voice_recognition_error_is_explained(client, monkeypatch, tmp_path):
     monkeypatch.setattr("labmentor.assistant.synthesize", lambda text, voice, out: None)
     recording = handle_file(str(make_wav(tmp_path / "silence.wav")))
     chat = client.predict(recording, [], "ru-RU-SvetlanaNeural", *OPTIONS, api_name="/on_voice")[0]
-    assert "⚠️ Речь не распознана" in chat_text(chat) and "Цель работы" not in chat_text(chat)
+    assert "Речь не распознана" in chat_text(chat) and "Цель работы" not in chat_text(chat)
 
 
 def test_check_voice_button(client, monkeypatch, tmp_path):

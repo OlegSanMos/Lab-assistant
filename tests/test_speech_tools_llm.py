@@ -89,7 +89,7 @@ def test_local_transcription_uses_whisper(monkeypatch, settings, tmp_path):
     settings.stt_engine = "local"
     audio = make_wav(tmp_path / "question.wav")
     assert speech.transcribe(audio, settings) == "Какова цель работы?"
-    assert "✅ готова" in speech.stt_status(settings)
+    assert "на компьютере: готова" in speech.stt_status(settings)
 
 
 def test_api_transcription_uses_openai_client(monkeypatch, settings, tmp_path):
@@ -114,7 +114,7 @@ def test_transcription_falls_back_and_explains_errors(monkeypatch, settings, tmp
     monkeypatch.setattr(speech, "_whisper", no_model)
     monkeypatch.setattr("openai.OpenAI", fake_openai())
     assert speech.transcribe(audio, settings) == "Закон Ома"
-    assert "❌ не загружена (ConnectionError" in speech.stt_status(settings)
+    assert ": не загружена (ConnectionError" in speech.stt_status(settings)
 
     region = RuntimeError("Error code: 403 - unsupported_country_region_territory")
     monkeypatch.setattr("openai.OpenAI", fake_openai(error=region))
@@ -216,10 +216,10 @@ def test_preload_loads_model_in_background(monkeypatch, settings):
     monkeypatch.setattr(speech, "model_cached", lambda size: True)
     thread = speech.preload(settings, quiet=True)
     assert started.wait(5) and speech.stt_loading(settings)
-    assert "⏳ загружается" in speech.stt_status(settings)
+    assert ": загружается" in speech.stt_status(settings)
     release.set()
     thread.join(5)
-    assert not speech.stt_loading(settings) and "✅ готова" in speech.stt_status(settings)
+    assert not speech.stt_loading(settings) and ": готова" in speech.stt_status(settings)
 
 
 def test_synthesis_falls_back_and_skips_failed_engines(monkeypatch, tmp_path):

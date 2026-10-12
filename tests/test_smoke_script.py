@@ -15,7 +15,7 @@ def test_smoke_scenarios_pass_with_scripted_model(course_assistant, capsys):
     results = smoke.run_smoke(course_assistant, internet=False)
     failed = [(r.name, r.details) for r in results if not r.ok]
     assert failed == []
-    assert len(results) == 9
+    assert len(results) == 10
     log = smoke.save_log(results, course_assistant.settings)
     assert "OK: RAG по методичке" in log.read_text(encoding="utf-8")
     assert "Агент-аналитик и график" in capsys.readouterr().out

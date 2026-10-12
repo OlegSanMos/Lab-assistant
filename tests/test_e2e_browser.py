@@ -2,8 +2,16 @@ import socket
 import time
 
 import pytest
+from PIL import Image
 
-from conftest import DEMO_MANUALS, SAMPLES, ScriptedChatModel, lab_responder, make_wav
+from conftest import (
+    DEMO_MANUALS,
+    SAMPLES,
+    ScriptedChatModel,
+    lab_responder,
+    make_video,
+    make_wav,
+)
 from labmentor.assistant import LabAssistant
 from labmentor.config import Settings
 from labmentor.ui import INPUT_HINT, build_ui, launch_options
@@ -105,7 +113,7 @@ def test_page_has_controls(page):
         "Размер контекстного окна модели, токенов",
     ):
         assert page.get_by_text(label).first.is_visible()
-    assert page.get_by_role("tab", name="📊 Обработка данных").is_visible()
+    assert page.get_by_role("tab", name="Обработка данных").is_visible()
     visible(page, "Здравствуйте! Я ЛабМентор")
 
 
@@ -138,21 +146,56 @@ def test_any_file_is_read_and_remembered(page, tmp_path):
     netlist = tmp_path / "filter.cir"
     netlist.write_text("* RC-фильтр\nR1 in out 1k\nC1 out 0 1u\n.end\n", encoding="utf-8")
     ask(page, "", files=[netlist])
-    visible(page, "📎 filter.cir")
+    visible(page, "Файл: filter.cir")
     visible(page, "Цель работы: проверить закон Ома")
     visible(page, "Файлы в памяти диалога: filter.cir")
 
 
+def test_video_is_watched_in_chat(page, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "labmentor.assistant.transcribe", lambda path, settings: "Включаю генератор"
+    )
+    ask(page, "", files=[make_video(tmp_path / "opyt.mp4")])
+    visible(page, "Видео: opyt.mp4")
+    visible(page, "tau около 1 с")
+    sheet = page.locator("img[src*='video_']").first
+    sync_api.expect(sheet).to_be_visible(timeout=30_000)
+    page.wait_for_function(
+        "image => image.complete && image.naturalWidth > 400", arg=sheet.element_handle()
+    )
+    visible(page, "Файлы в памяти диалога: opyt.mp4")
+
+
+def test_report_has_real_pictures(page, tmp_path):
+    photo = tmp_path / "stand.jpg"
+    Image.new("RGB", (640, 480), (40, 90, 160)).save(photo)
+    page.get_by_label("Текущая лабораторная работа (для отчета, защиты и схем)").click()
+    page.get_by_role("option", name="Лабораторная работа № 1.", exact=False).first.click()
+    page.get_by_role("tab", name="Отчет").click()
+    page.locator('input[type=file][accept="image/*"]').set_input_files(str(photo))
+    page.wait_for_timeout(800)
+    captions = page.get_by_label("Подписи к рисункам по одной на строку, иначе их даст модель")
+    captions.fill("Фото лабораторного стенда")
+    page.get_by_role("button", name="Сформировать черновик отчета").click()
+    visible(page, "Рисунок 1. Фото лабораторного стенда")
+    visible(page, "Материалы, приложенные к работе, приведены на рисунке 1.")
+    picture = page.locator("img[alt='Рисунок 1. Фото лабораторного стенда']").first
+    page.wait_for_function(
+        "image => image.complete && image.naturalWidth == 640", arg=picture.element_handle()
+    )
+    assert page.locator("a[download$='.docx']").count() >= 1
+
+
 def test_data_processing_tab(page):
-    page.get_by_role("tab", name="📊 Обработка данных").click()
+    page.get_by_role("tab", name="Обработка данных").click()
     page.locator('input[type=file][accept=".csv, .tsv, .xlsx"]').set_input_files(
         str(SAMPLES / "ohm_law.csv")
     )
     visible(page, "Загружена таблица ohm_law.csv")
     page.get_by_placeholder("R, Ом = U_В / I_мА * 1000").fill("R, Ом = U_В / I_мА * 1000")
-    page.get_by_role("button", name="➕ Добавить столбец").click()
+    page.get_by_role("button", name="Добавить столбец").click()
     visible(page, "Добавлен столбец R_Ом")
-    page.get_by_role("button", name="📈 Обработать").click()
+    page.get_by_role("button", name="Обработать").click()
     visible(page, "Коэффициент детерминации R² = 0.99998")
     visible(page, "Результат: R_Ом = 101.34 ± 0.32, P = 0.95")
 
@@ -161,7 +204,7 @@ def test_clear_dialog(page):
     ask(page, "Привет!", files=())
     visible(page, "Сообщений в окне: 2 из 2")
     sync_api.expect(page.get_by_placeholder(INPUT)).to_be_editable(timeout=30_000)
-    page.get_by_role("button", name="🧹 Очистить диалог").click()
+    page.get_by_role("button", name="Очистить диалог").click()
     visible(page, "Здравствуйте! Я ЛабМентор")
     visible(page, "Сообщений в окне: 0 из 0")
 
@@ -187,7 +230,7 @@ def test_voice_question_by_microphone(page, monkeypatch, tmp_path):
     recorder.get_by_role("button", name="Record").first.click()
     page.wait_for_timeout(1500)
     recorder.get_by_role("button", name="Stop").first.click()
-    visible(page, f"🎤 {question}")
+    visible(page, f"Голосом: {question}")
     visible(page, "Цель работы: проверить закон Ома")
     spoken = page.locator("#voice-answer a[download]")
     sync_api.expect(spoken).to_have_attribute("download", "answer.wav")

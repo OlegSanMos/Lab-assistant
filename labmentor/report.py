@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +11,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
+from PIL import Image
 
 from .formulas import TAGS, latex_to_text
 
@@ -25,6 +27,13 @@ HEADING = re.compile(r"^(#{2,4})\s+(.*)")
 BULLET = re.compile(r"^\s*[-*]\s+(.*)")
 NUMBERED = re.compile(r"^\s*\d+[.)]\s+(.*)")
 RULE = re.compile(r"^\s*([-*_])\1{2,}\s*$")
+IMAGE = re.compile(r"!\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+\"[^\"]*\")?\s*\)")
+IMAGE_LINE = re.compile(rf"^\s*{IMAGE.pattern}\s*$")
+FIGURE_NAME = re.compile(r"^\s*(?:рис\.|рисунок)\s*(\d+)\s*[.:\u2013\u2014-]?\s*", re.IGNORECASE)
+CAPTION_LINE = re.compile(r"^\s*\*?\s*(?:рис\.|рисунок)\s*\d+\s*[.:\u2013\u2014-]", re.IGNORECASE)
+FIGURE_REF = re.compile(r"(?<![а-яё])(рис\.|рисун[а-яё]*)(\s*)(\d+)", re.IGNORECASE)
+DOCX_IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"}
+PLOT_NAME = "Экспериментальная зависимость и аппроксимация МНК"
 
 
 def _add_text(paragraph, text: str, bold: bool = False) -> None:
@@ -83,24 +92,203 @@ def _has_data(table: pd.DataFrame | None, plot: str | None) -> tuple[bool, bool]
     return table is not None and len(table) > 0, bool(plot) and Path(plot).exists()
 
 
-def report_inserts(table: pd.DataFrame | None, plot: str | None) -> str:
+def report_inserts(
+    table: pd.DataFrame | None, plot: str | None, figures: list[tuple[str, str]] = ()
+) -> str:
     has_table, has_plot = _has_data(table, plot)
+    parts = []
     items = ["таблицу 1 с результатами измерений"] if has_table else []
     if has_plot:
-        items.append("рисунок 1 с графиком зависимости")
-    if not items:
-        return "нет, свои таблицы и рисунки нумеруй с 1."
-    return (
-        "программа сама вставит в начало раздела «Результаты измерений и их обработка» "
-        + " и ".join(items)
-        + " и сошлется на них. Не повторяй эти данные, свои таблицы и рисунки нумеруй со "
-        "следующего номера."
-    )
+        items.append("график зависимости")
+    if items:
+        parts.append(
+            "программа сама вставит в начало раздела «Результаты измерений и их обработка» "
+            + " и ".join(items)
+            + " и сошлется на них, не повторяй эти данные"
+        )
+    if figures:
+        listed = "; ".join(f"![{caption}]({ref})" for ref, caption in figures)
+        parts.append(
+            "рисунки студента вставь отдельными строками в подходящие разделы, не меняя путь: "
+            + listed
+        )
+    parts.append("свои таблицы нумеруй " + ("со 2" if has_table else "с 1"))
+    return "; ".join(parts) + "."
+
+
+def _existing(ref: str) -> Path | None:
+    path = Path(ref)
+    return path if path.is_absolute() and path.is_file() else None
+
+
+def _figure(name: str, path: Path | None, old: int | None = None) -> dict:
+    return {"kind": "figure", "name": name, "path": path, "old": old, "number": 0}
+
+
+def _measurement_blocks(table, plot, extra: list[dict]) -> list:
+    has_table, has_plot = _has_data(table, plot)
+    blocks = []
+    if has_table:
+        labels = table.attrs.get("labels", {})
+        header = [str(labels.get(column, column)) for column in table.columns]
+        rows = [[_number(value) for value in row] for row in table.head(50).itertuples(index=False)]
+        blocks += [
+            "Результаты измерений приведены в таблице 1.",
+            "",
+            "Таблица 1 – Результаты измерений",
+        ]
+        blocks += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+        blocks += ["| " + " | ".join(row) + " |" for row in rows] + [""]
+    if has_plot:
+        plot_figure = _figure(PLOT_NAME, Path(plot))
+        blocks += [
+            {
+                "kind": "ref",
+                "figures": [plot_figure],
+                "text": "Экспериментальная зависимость и ее аппроксимация по методу наименьших "
+                "квадратов показаны на {}.",
+            },
+            plot_figure,
+        ]
+    if extra:
+        text = "Материалы, приложенные к работе, приведены на {}."
+        blocks += [{"kind": "ref", "figures": extra, "text": text}, *extra]
+    return blocks
+
+
+def _figure_words(numbers: list[int]) -> str:
+    if len(numbers) == 1:
+        return f"рисунке {numbers[0]}"
+    return "рисунках " + ", ".join(map(str, numbers[:-1])) + f" и {numbers[-1]}"
+
+
+def figure_catalog(text: str) -> dict[int, tuple[str, str]]:
+    catalog = {}
+    for match in IMAGE.finditer(text):
+        number = FIGURE_NAME.match(match.group(1))
+        if number:
+            name = FIGURE_NAME.sub("", match.group(1)).strip(" *.")
+            catalog.setdefault(int(number.group(1)), (name, match.group(2) or match.group(3)))
+    return catalog
+
+
+def _with_manual_figures(blocks: list, manual: dict, find: Callable) -> list:
+    placed = {b["old"] for b in blocks if isinstance(b, dict) and b["old"] is not None}
+    result, waiting = [], []
+    for index, block in enumerate(blocks):
+        if isinstance(block, str) and CAPTION_LINE.match(block):
+            number = int(FIGURE_NAME.match(block.replace("*", "")).group(1))
+            if number in manual and number not in placed:
+                placed.add(number)
+                result.append(_figure(manual[number][0], find(manual[number][1]), number))
+                continue
+        result.append(block)
+        if isinstance(block, str):
+            for match in FIGURE_REF.finditer(block):
+                number = int(match.group(3))
+                if number in manual and number not in placed:
+                    path = find(manual[number][1])
+                    if path is not None:
+                        placed.add(number)
+                        waiting.append(_figure(manual[number][0], path, number))
+        following = blocks[index + 1] if index + 1 < len(blocks) else ""
+        ended = not isinstance(following, str) or not following.strip()
+        if waiting and (ended or HEADING.match(following)):
+            result += ["", *waiting, ""]
+            waiting = []
+    return result
+
+
+def compose_report(
+    markdown: str,
+    table: pd.DataFrame | None = None,
+    plot: str | None = None,
+    figures: list[tuple[str, str]] = (),
+    find_image: Callable[[str], Path | None] | None = None,
+    manual: dict[int, tuple[str, str]] | None = None,
+) -> str:
+    find = find_image or _existing
+    blocks: list = []
+    caption_may_follow = False
+    for line in IMAGE.sub(lambda m: f"\n{m.group(0)}\n", markdown).splitlines():
+        image = IMAGE_LINE.match(line)
+        if image:
+            old = FIGURE_NAME.match(image.group(1))
+            name = FIGURE_NAME.sub("", image.group(1)).strip(" *.")
+            ref = image.group(2) or image.group(3)
+            blocks.append(_figure(name, find(ref), int(old.group(1)) if old else None))
+            caption_may_follow = True
+            continue
+        if caption_may_follow and CAPTION_LINE.match(line):
+            figure = next(b for b in reversed(blocks) if isinstance(b, dict))
+            figure["name"] = figure["name"] or FIGURE_NAME.sub("", line.replace("*", "")).strip(
+                " ."
+            )
+            caption_may_follow = False
+            continue
+        caption_may_follow = caption_may_follow and not line.strip()
+        blocks.append(line)
+    if manual:
+        blocks = _with_manual_figures(blocks, manual, find)
+    placed = {b["path"] for b in blocks if isinstance(b, dict) and b["path"]}
+    extra = [
+        _figure(caption, path)
+        for ref, caption in figures
+        if (path := find(ref)) is not None and path not in placed
+    ]
+    inserts = _measurement_blocks(table, plot, extra)
+    if inserts:
+        results = next(
+            (
+                i
+                for i, b in enumerate(blocks)
+                if isinstance(b, str) and HEADING.match(b) and "результат" in b.lower()
+            ),
+            None,
+        )
+        if results is None:
+            results = next(
+                (
+                    i
+                    for i, b in enumerate(blocks)
+                    if isinstance(b, str) and HEADING.match(b) and "вывод" in b.lower()
+                ),
+                len(blocks),
+            )
+            blocks[results:results] = ["## Результаты измерений и их обработка", ""]
+        blocks[results + 1 : results + 1] = ["", *inserts]
+    mapping, count = {}, 0
+    for block in blocks:
+        if isinstance(block, dict) and block["kind"] == "figure" and block["path"]:
+            count += 1
+            block["number"] = count
+            if block["old"] is not None:
+                mapping.setdefault(block["old"], count)
+    output = []
+    for block in blocks:
+        if isinstance(block, str):
+            output.append(
+                FIGURE_REF.sub(
+                    lambda m: (
+                        m.group(1) + m.group(2) + str(mapping.get(int(m.group(3)), m.group(3)))
+                    ),
+                    block,
+                )
+            )
+        elif block["kind"] == "ref":
+            output.append(
+                block["text"].format(_figure_words([f["number"] for f in block["figures"]]))
+            )
+        elif block["path"]:
+            output += ["", f"![Рисунок {block['number']}. {block['name']}](<{block['path']}>)", ""]
+        else:
+            output.append(f"[вставить рисунок: {block['name'] or 'рисунок из методички'}]")
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip() + "\n"
 
 
 class _Writer:
-    def __init__(self, document) -> None:
-        self.doc = document
+    def __init__(self, document, folder: Path) -> None:
+        self.doc, self.folder = document, folder
         self.tables = self.formulas = 0
         self.after_blank = self.captioned = False
 
@@ -175,24 +363,26 @@ class _Writer:
         _add_text(paragraph, f"\t{text}\t({number})")
         self.after_blank = False
 
-    def measurements(self, table: pd.DataFrame | None, plot: str | None) -> None:
-        has_table, has_plot = _has_data(table, plot)
-        if has_table:
-            labels = table.attrs.get("labels", {})
-            self.add("Результаты измерений приведены в таблице 1.")
-            self.caption("Таблица", "1", "Результаты измерений")
-            rows = [[labels.get(column, column) for column in table.columns]]
-            rows += [[_number(v) for v in row] for row in table.head(50).itertuples(index=False)]
-            self.table(rows)
-        if has_plot:
-            self.add(
-                "Экспериментальная зависимость и ее аппроксимация по методу наименьших квадратов "
-                "показаны на рисунке 1."
-            )
-            picture = self.add(indent=False, align=CENTER)
-            picture.add_run().add_picture(plot, width=Cm(15))
-            picture.paragraph_format.keep_with_next = True
-            self.caption("Рисунок", "1", "Экспериментальная зависимость и аппроксимация МНК")
+    def picture(self, path: str, caption: str) -> None:
+        file = Path(path)
+        try:
+            with Image.open(file) as image:
+                width, height = image.size
+                if file.suffix.lower() not in DOCX_IMAGES:
+                    self.folder.mkdir(parents=True, exist_ok=True)
+                    file = self.folder / f"{file.stem}_{uuid.uuid4().hex[:6]}.png"
+                    image.convert("RGB").save(file)
+        except Exception:
+            self.add(f"[не удалось вставить рисунок: {caption}]")
+            return
+        paragraph = self.add(indent=False, align=CENTER)
+        paragraph.add_run().add_picture(str(file), width=Cm(min(15.0, 12.0 * width / height)))
+        paragraph.paragraph_format.keep_with_next = True
+        match = CAPTION.match(caption)
+        if match:
+            self.caption("Рисунок", match.group(2), match.group(4).strip())
+        elif caption:
+            self.add(caption, indent=False, align=CENTER)
 
 
 def _items(markdown: str) -> list[tuple[str, str]]:
@@ -244,14 +434,22 @@ def export_report_docx(
     out_dir: Path,
     table: pd.DataFrame | None = None,
     plot: str | None = None,
+    figures: list[tuple[str, str]] = (),
+    find_image: Callable[[str], Path | None] | None = None,
+    manual: dict[int, tuple[str, str]] | None = None,
 ) -> str:
+    final = compose_report(markdown, table, plot, figures, find_image, manual)
+    return render_report_docx(final, title, out_dir)
+
+
+def render_report_docx(markdown: str, title: str, out_dir: Path) -> str:
     document = Document()
     _setup(document)
-    writer = _Writer(document)
+    writer = _Writer(document, out_dir)
     writer.add("Отчет по лабораторной работе", indent=False, align=CENTER, bold=True)
     if title:
         writer.add(title, indent=False, align=CENTER, bold=True)
-    items, index, inserted = _items(markdown), 0, False
+    items, index = _items(markdown), 0
     while index < len(items):
         kind, line = items[index]
         index += 1
@@ -261,6 +459,10 @@ def export_report_docx(
             continue
         line = line.rstrip()
         if not line.strip() or line.startswith("# ") or RULE.match(line):
+            continue
+        image = IMAGE_LINE.match(line)
+        if image:
+            writer.picture(image.group(2) or image.group(3), image.group(1))
             continue
         if _is_row((kind, line)):
             rows = [line]
@@ -272,11 +474,7 @@ def export_report_docx(
         heading, caption = HEADING.match(line), _caption(line, _next_line(items, index))
         bullet, number = BULLET.match(line), NUMBERED.match(line)
         if heading:
-            title_text = TAGS.sub("", heading.group(2)).strip()
-            writer.heading(title_text, len(heading.group(1)) - 1)
-            if not inserted and "результат" in title_text.lower():
-                writer.measurements(table, plot)
-                inserted = True
+            writer.heading(TAGS.sub("", heading.group(2)).strip(), len(heading.group(1)) - 1)
         elif caption:
             writer.caption(caption.group(1), caption.group(2), caption.group(4).strip())
         elif bullet:
@@ -289,9 +487,6 @@ def export_report_docx(
             writer.add(re.sub(r"^где\s*:?\s*", "где ", line.strip()), indent=False)
         else:
             writer.add(line)
-    if not inserted and any(_has_data(table, plot)):
-        writer.heading("Результаты измерений и их обработка", 1)
-        writer.measurements(table, plot)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"report_{uuid.uuid4().hex[:8]}.docx"
     document.save(str(path))

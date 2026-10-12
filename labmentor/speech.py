@@ -255,11 +255,11 @@ def stt_status(settings: Settings) -> str:
         size = settings.whisper_size
         state = _model_state.get(size)
         if state == "готова":
-            status = f"Whisper {size} на компьютере ✅ готова"
+            status = f"Whisper {size} на компьютере: готова"
         elif state == "загружается":
-            status = f"Whisper {size} на компьютере ⏳ загружается ({_model_mb(size)})"
+            status = f"Whisper {size} на компьютере: загружается ({_model_mb(size)})"
         elif state:
-            status = f"Whisper {size} на компьютере ❌ {state}"
+            status = f"Whisper {size} на компьютере: {state}"
         else:
             status = f"Whisper {size} на компьютере, загрузится при первом вопросе"
     if len(engines) > 1:
@@ -293,6 +293,7 @@ _piper_speak_lock = threading.Lock()
 def text_for_speech(text: str, limit: int = MAX_TTS_CHARS) -> str:
     text = latex_to_text(re.sub(r"```.*?```", " ", text, flags=re.S))
     text = re.sub(r"^\s*\|.*\|\s*$", " ", text, flags=re.M)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)
     text = re.sub(r"https?://\S+", " ", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"\[[^\]]*\.(md|pdf|docx|txt)\]", " ", text)

@@ -34,13 +34,9 @@ def rc_discharge() -> tuple[np.ndarray, np.ndarray]:
     return t, u
 
 
-def oscillogram() -> None:
-    t = np.linspace(-0.5, 4.5, 800)
-    u = np.where(t < 0, 9.8, 9.8 * np.exp(-np.clip(t, 0, None) / 1.06))
-    u = u + rng.normal(0, 0.04, t.size)
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=120, facecolor="#101418")
+def scope(figsize: tuple[float, float], dpi: int):
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi, facecolor="#101418")
     ax.set_facecolor("#0b1a12")
-    ax.plot(t, u, color="#39ff88", linewidth=1.6)
     ax.set_xlim(-0.5, 4.5)
     ax.set_ylim(-2, 12)
     ax.set_xticks(np.arange(-0.5, 4.51, 0.5))
@@ -58,7 +54,39 @@ def oscillogram() -> None:
         loc="left",
     )
     fig.tight_layout()
+    return fig, ax
+
+
+def discharge_trace() -> tuple[np.ndarray, np.ndarray]:
+    t = np.linspace(-0.5, 4.5, 800)
+    u = np.where(t < 0, 9.8, 9.8 * np.exp(-np.clip(t, 0, None) / 1.06))
+    return t, u + rng.normal(0, 0.04, t.size)
+
+
+def oscillogram() -> None:
+    t, u = discharge_trace()
+    fig, ax = scope((8, 5), 120)
+    ax.plot(t, u, color="#39ff88", linewidth=1.6)
     fig.savefig(SAMPLES / "rc_oscillogram.png", facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+
+def discharge_video() -> None:
+    import av
+
+    t, u = discharge_trace()
+    fig, ax = scope((8, 5), 80)
+    (line,) = ax.plot([], [], color="#39ff88", linewidth=1.6)
+    with av.open(str(SAMPLES / "rc_discharge.mp4"), "w") as video:
+        stream = video.add_stream("libx264", rate=10, options={"crf": "30"})
+        stream.width, stream.height, stream.pix_fmt = 640, 400, "yuv420p"
+        for step in range(60):
+            shown = t <= -0.5 + step * 0.1
+            line.set_data(t[shown], u[shown])
+            fig.canvas.draw()
+            pixels = np.asarray(fig.canvas.buffer_rgba())[..., :3]
+            video.mux(stream.encode(av.VideoFrame.from_ndarray(pixels, format="rgb24")))
+        video.mux(stream.encode(None))
     plt.close(fig)
 
 
@@ -76,4 +104,5 @@ if __name__ == "__main__":
     rc_discharge()
     oscillogram()
     diode()
+    discharge_video()
     print("Демонстрационные данные сохранены в", SAMPLES)

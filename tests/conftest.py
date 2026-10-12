@@ -69,6 +69,48 @@ def make_wav(path: Path, seconds: float = 1.0) -> Path:
     return path
 
 
+def make_video(
+    path: Path,
+    seconds: float = 3.0,
+    video: str | None = "mpeg4",
+    audio: str | None = "aac",
+    size: tuple[int, int] = (160, 120),
+    live: bool = False,
+) -> Path:
+    import av
+    import numpy as np
+
+    rate, fps = (48000 if audio and "opus" in audio else 16000), 10
+    with av.open(str(path), "w", container_options={"live": "1"} if live else None) as out:
+        streams = []
+        if video:
+            picture = out.add_stream(video, rate=fps)
+            picture.width, picture.height, picture.pix_fmt = *size, "yuv420p"
+            total, frames = int(seconds * fps), []
+            for index in range(total):
+                share = index / max(1, total - 1)
+                pixels = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+                pixels[..., 0], pixels[..., 2] = int(255 * (1 - share)), int(255 * share)
+                pixels[: size[1] // 4, : size[0] // 4] = (0, 255, 0)
+                frames.append(av.VideoFrame.from_ndarray(pixels, format="rgb24"))
+            streams.append((picture, frames))
+        if audio:
+            sound = out.add_stream(audio, rate=rate)
+            sound.layout = "mono"
+            tone = 0.3 * np.sin(2 * math.pi * 440 * np.arange(int(seconds * rate)) / rate)
+            tone, frames = (tone * 32767).astype(np.int16), []
+            for start in range(0, len(tone), 960):
+                part = tone[None, start : start + 960]
+                frame = av.AudioFrame.from_ndarray(part, format="s16", layout="mono")
+                frame.sample_rate, frame.pts = rate, start
+                frames.append(frame)
+            streams.append((sound, frames))
+        for stream, frames in streams:
+            for frame in [*frames, None]:
+                out.mux(stream.encode(frame))
+    return path
+
+
 def tool_call(name: str, args: dict, call_id: str) -> AIMessage:
     return AIMessage(
         content="", tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}]
@@ -142,6 +184,8 @@ def lab_responder(messages: list[BaseMessage]) -> AIMessage | str:
         return "На осциллограмме экспоненциальный разряд, tau около 1 с."
     if "Ты распознаешь текст" in system:
         return SCAN_TEXT
+    if "Ты подписываешь рисунки" in system:
+        return "«Схема лабораторной установки.»"
     if "Составь черновик отчета" in system:
         return (
             "## Цель работы\nПроверить закон Ома.\n## Результаты измерений и их обработка\n"

@@ -7,9 +7,11 @@ import json
 import re
 import shutil
 import subprocess
+import textwrap
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
@@ -31,8 +33,9 @@ from .graphics import draw_flowchart, plot_fit
 from .knowledge import KnowledgeBase, format_docs, load_file
 from .llm import create_chat_model, create_embeddings
 from .memory import ConversationMemory, plan_context
-from .report import export_report_docx, report_inserts
-from .speech import AUDIO_EXTENSIONS, SpeechError, synthesize, transcribe
+from .report import compose_report, figure_catalog, render_report_docx, report_inserts
+from .speech import NO_SPEECH, SpeechError, synthesize, transcribe
+from .video import clock, contact_sheet, extract_audio, is_video, is_voice, key_frames
 
 IMAGE_EXTENSIONS = {
     ".png",
@@ -46,19 +49,24 @@ IMAGE_EXTENSIONS = {
     ".heic",
     ".heif",
 }
-DOCUMENT, TABLE, IMAGE = "документ", "таблица", "изображение"
+DOCUMENT, TABLE, IMAGE, VIDEO = "документ", "таблица", "изображение", "видео"
+FIGURE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 FILE_WORDS = re.compile(r"файл|документ|загруж|прикреп|вложен", re.IGNORECASE)
 OCR_PAGES = 10
 SUMMARY_REQUEST = (
     "Прочитай загруженные файлы ({names}) и кратко перескажи их содержание: о чем они и что в них "
     "главное."
 )
+VIDEO_REQUEST = (
+    "Посмотри видео ({names}): опиши по кадрам, что происходит в опыте, какие приборы и показания "
+    "видны, и проверь, нет ли ошибок."
+)
 MODES = {
     "auto": "Авто (диспетчер)",
     "manual": "Консультант по методичкам (RAG)",
     "research": "Агент-исследователь (интернет)",
     "data": "Агент-аналитик данных",
-    "vision": "Анализ изображения",
+    "vision": "Анализ изображений и видео",
     "flowchart": "Блок-схема хода работы",
     "exam": "Экзаменатор (защита работы)",
     "chat": "Свободный диалог",
@@ -93,6 +101,7 @@ class Attachments:
     notes: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
     documents: list[str] = field(default_factory=list)
+    videos: list[str] = field(default_factory=list)
     speech: str = ""
     speech_error: str = ""
 
@@ -114,6 +123,7 @@ class Session:
     files: list[FileRecord] = field(default_factory=list)
     new_files: list[FileRecord] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
+    media: dict[str, str] = field(default_factory=dict)
     turn: int = 0
 
     def files_text(self) -> str:
@@ -125,7 +135,7 @@ class Session:
         return [f for f in self.files if f.kind == DOCUMENT]
 
     def forget_files(self) -> None:
-        self.files, self.new_files, self.images = [], [], []
+        self.files, self.new_files, self.images, self.media = [], [], [], {}
 
 
 @dataclass
@@ -247,7 +257,9 @@ class LabAssistant:
         for path in map(Path, paths or []):
             ext = path.suffix.lower()
             try:
-                if ext in AUDIO_EXTENSIONS:
+                if is_video(path):
+                    self.read_video(session, path, result)
+                elif is_voice(path):
                     result.speech = f"{result.speech} {transcribe(path, self.settings)}".strip()
                 elif ext in IMAGE_EXTENSIONS:
                     result.images.append(open_image(path, self.settings.output_dir))
@@ -275,6 +287,45 @@ class LabAssistant:
         if result.images:
             session.images = result.images
         return result
+
+    def read_video(self, session: Session, path: Path, result: Attachments) -> None:
+        folder = self.settings.output_dir / "video"
+        name = f"video_{file_digest(path)[:12]}"
+        try:
+            length, shots = key_frames(path)
+        except ImportError:
+            raise ValueError("для разбора видео нужен пакет av: pip install av") from None
+        if not shots:
+            raise ValueError("в файле нет кадров видео")
+        sheet = str(contact_sheet(shots, folder / f"{name}.jpg", length < 60))
+        status, said = self.video_speech(path, folder / f"{name}.wav")
+        session.media[sheet] = (
+            f"Это раскадровка видео {path.name} длительностью {clock(length)}: {len(shots)} "
+            "кадров по порядку слева направо и сверху вниз, под каждым кадром его номер и время "
+            f"от начала видео. {said}"
+        )
+        result.images.append(sheet)
+        result.videos.append(path.name)
+        frames = f"{clock(length)}, раскадровка из {len(shots)} кадров отправлена модели"
+        result.notes.append(f"Видео {path.name}: {frames}; {textwrap.shorten(status, 1500)}")
+        info = f"{frames}; {textwrap.shorten(status, 300)}"
+        self._remember(session, FileRecord(path.name, VIDEO, info))
+
+    def video_speech(self, path: Path, wav: Path) -> tuple[str, str]:
+        try:
+            audio = extract_audio(path, wav)
+            if audio is None:
+                return "звуковой дорожки нет", "Звуковой дорожки в видео нет."
+            heard = transcribe(audio, self.settings)
+            return f"речь: «{heard}»", f"Распознанная речь из видео: «{heard[:4000]}»"
+        except SpeechError as exc:
+            if str(exc) == NO_SPEECH:
+                return "речи нет", "Речи в видео нет."
+            return f"речь не распознана ({exc})", "Речь из видео распознать не удалось."
+        except Exception as exc:
+            return f"звук не прочитан ({exc})", "Звук видео прочитать не удалось."
+        finally:
+            wav.unlink(missing_ok=True)
 
     def _remember(self, session: Session, record: FileRecord) -> None:
         record.turn = session.turn
@@ -390,14 +441,14 @@ class LabAssistant:
         try:
             reply.route = self.choose_route(session, question, options, images)
             reply.steps.append(
-                {"title": "🧭 Диспетчер", "content": f"Исполнитель: {MODES[reply.route]}"}
+                {"title": "Диспетчер", "content": f"Исполнитель: {MODES[reply.route]}"}
             )
             yield reply
             handler = getattr(self, f"_handle_{reply.route}")
             yield from handler(session, question, options, reply, images)
         except Exception as exc:
             reply.error = True
-            reply.text = f"⚠️ Не удалось получить ответ: {exc}"
+            reply.text = f"Не удалось получить ответ: {exc}"
         if not reply.error and reply.text:
             asked = question or ("[изображение]" if images else "")
             if session.new_files:
@@ -478,7 +529,8 @@ class LabAssistant:
             yield reply
             return
         text = question or "Что изображено? Сними значения и проверь, нет ли ошибок."
-        content = [{"type": "text", "text": text}]
+        notes = [session.media[path] for path in images[:4] if path in session.media]
+        content = [{"type": "text", "text": "\n\n".join([text, *notes])}]
         content += [
             {"type": "image_url", "image_url": {"url": image_to_data_url(path)}}
             for path in images[:4]
@@ -529,7 +581,7 @@ class LabAssistant:
                     if isinstance(message, AIMessage):
                         for call in message.tool_calls:
                             steps[call["id"]] = {
-                                "title": f"🔧 Инструмент {call['name']}",
+                                "title": f"Инструмент {call['name']}",
                                 "content": "Аргументы: "
                                 + json.dumps(call["args"], ensure_ascii=False),
                             }
@@ -672,17 +724,71 @@ class LabAssistant:
         chunks = [c.page_content for c in self.kb.chunks if c.metadata.get("title") == title]
         return "\n".join(chunks)[:12000] if chunks else format_docs(self.kb.search(title, 6))
 
-    def make_report(self, session: Session, options: Options, notes: str) -> tuple[str, str]:
-        markdown = chains.build_report_chain(self.llm(options)).invoke(
+    def manual_figures(self, title: str) -> dict[int, tuple[str, str]]:
+        chunks = [c.page_content for c in self.kb.chunks if c.metadata.get("title") == title]
+        return figure_catalog("\n".join(chunks))
+
+    def find_image(self, ref: str) -> Path | None:
+        ref = unquote(ref.split("file=", 1)[-1]).strip()
+        roots = [self.settings.manuals_dir, self.settings.uploads_dir, self.settings.output_dir]
+        roots = [root.resolve() for root in roots]
+        relative = re.sub(r"^(\./|data/manuals/)+", "", ref)
+        path = Path(ref)
+        candidates = [path] if path.is_absolute() else [root / relative for root in roots]
+        for candidate in candidates:
+            candidate = candidate.resolve()
+            inside = any(candidate.is_relative_to(root) for root in roots)
+            if inside and candidate.suffix.lower() in FIGURE_SUFFIXES and candidate.is_file():
+                return candidate
+        return None
+
+    def report_figures(
+        self, paths: list[str], captions: str = "", options: Options | None = None
+    ) -> list[tuple[str, str]]:
+        folder = self.settings.output_dir / "figures"
+        folder.mkdir(parents=True, exist_ok=True)
+        names = [line.strip() for line in (captions or "").splitlines() if line.strip()]
+        figures = []
+        for index, source in enumerate(map(Path, paths or [])):
+            image = Path(open_image(source, folder))
+            target = folder / f"{file_digest(image)[:12]}{image.suffix.lower()}"
+            if not target.exists():
+                shutil.copy2(image, target)
+            if index < len(names):
+                caption = names[index]
+            else:
+                caption = self.caption_image(target, source.stem, options or Options())
+            figures.append((f"figures/{target.name}", caption))
+        return figures
+
+    def caption_image(self, path: Path, stem: str, options: Options) -> str:
+        try:
+            chain = chains.build_caption_chain(self.llm(options, vision=True, temperature=0))
+            caption = chain.invoke({"image_url": image_to_data_url(str(path))})
+        except Exception:
+            caption = ""
+        if caption:
+            return caption
+        named = re.sub(r"[_-]+", " ", stem).strip()
+        return named if re.search("[а-яё]", named, re.IGNORECASE) else "Рисунок к работе"
+
+    def make_report(
+        self,
+        session: Session,
+        options: Options,
+        notes: str,
+        figures: list[tuple[str, str]] = (),
+    ) -> tuple[str, str]:
+        table, plot = session.data.df, session.data.last_plot
+        draft = chains.build_report_chain(self.llm(options)).invoke(
             {
                 "lab": options.lab,
                 "manual": self.manual_text(options.lab),
                 "notes": notes or "нет",
                 "results": session.data.last_results or "обработка данных не выполнялась",
-                "inserts": report_inserts(session.data.df, session.data.last_plot),
+                "inserts": report_inserts(table, plot, figures),
             }
         )
-        path = export_report_docx(
-            markdown, options.lab, self.settings.output_dir, session.data.df, session.data.last_plot
-        )
-        return markdown, path
+        manual = self.manual_figures(options.lab)
+        final = compose_report(draft, table, plot, figures, self.find_image, manual)
+        return final, render_report_docx(final, options.lab, self.settings.output_dir)

@@ -131,5 +131,6 @@ def test_report_prompt_carries_department_rules(tmp_path, sample):
     assert "\\tag{1}" in messages[0].content and "нумеруй с 1" in messages[1].content
     df = load_table(sample("diode_iv.csv"))
     plot = plot_fit(df, fit_polynomial(df, "U_В", "I_мА", 2, 0.95), tmp_path)
-    inserts = report_inserts(df, plot)
-    assert "таблицу 1" in inserts and "рисунок 1" in inserts and "со следующего номера" in inserts
+    inserts = report_inserts(df, plot, [("figures/a.png", "Схема установки")])
+    assert "таблицу 1" in inserts and "график зависимости" in inserts and "со 2" in inserts
+    assert "![Схема установки](figures/a.png)" in inserts

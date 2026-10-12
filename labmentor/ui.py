@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote
 
 import gradio as gr
 import pandas as pd
@@ -9,6 +11,7 @@ from .assistant import (
     IMAGE_EXTENSIONS,
     MODES,
     SUMMARY_REQUEST,
+    VIDEO_REQUEST,
     LabAssistant,
     Options,
     Reply,
@@ -19,8 +22,8 @@ from .data_analysis import add_column, parse_column_spec
 from .formulas import LATEX_DELIMITERS, prettify_math
 from .knowledge import DOC_EXTENSIONS
 from .llm import PROVIDERS
+from .report import IMAGE
 from .speech import (
-    AUDIO_EXTENSIONS,
     MALE_VOICES,
     VOICES,
     piper_loading,
@@ -30,6 +33,7 @@ from .speech import (
     tts_status,
     voice_note,
 )
+from .video import is_voice
 
 TITLE = "ЛабМентор"
 SUBTITLE = "виртуальный ассистент лабораторного практикума по инженерным дисциплинам"
@@ -37,9 +41,9 @@ PLACEHOLDER = (
     "### Здравствуйте! Я ЛабМентор\n"
     "Помогу разобраться в методичке, обработать измерения, построить график, оформить отчет и "
     "подготовиться к защите лабораторной работы.\n\n"
-    "Пишите вопрос, прикрепляйте фото установки или осциллограммы, таблицу измерений (CSV, XLSX), "
-    "методичку (PDF, DOCX) или задайте вопрос голосом в блоке «🎤 Вопрос голосом» под полем "
-    "ввода: ответ прозвучит автоматически."
+    "Пишите вопрос, прикрепляйте фото установки или осциллограммы, видео опыта, таблицу "
+    "измерений (CSV, XLSX), методичку (PDF, DOCX) или задайте вопрос голосом в блоке «Вопрос "
+    "голосом» под полем ввода: ответ прозвучит автоматически."
 )
 EXAMPLES = [
     {"text": "Какова цель работы 1.1 и какие параметры модели диода в ней определяют?"},
@@ -47,15 +51,18 @@ EXAMPLES = [
     {"text": "Найди в интернете типичное напряжение Эрли транзистора и сравни с методичкой"},
     {"text": "Проверь меня: задай вопросы для защиты работы 1.2"},
 ]
-INPUT_HINT = "Задайте вопрос или прикрепите файл: методичку, таблицу, фото, аудио"
+INPUT_HINT = "Задайте вопрос или прикрепите файл: методичку, таблицу, фото, видео, аудио"
 VOICE_HINT = (
     "Запишите вопрос: после остановки записи он отправится сам, а ответ прозвучит автоматически."
 )
-NO_VOICE = "Озвучивание недоступно: нет связи с Edge TTS и Google TTS, системный голос не найден"
+NO_VOICE = (
+    "Озвучивание недоступно: нет связи с Edge TTS и Google TTS, голос Piper не загружен, "
+    "системный голос не найден"
+)
 ABOUT = """
 ### Назначение
 ЛабМентор сопровождает студента на всех этапах лабораторной работы: подготовка по методическим
-указаниям, получение справочных данных, анализ фото установки и осциллограмм, обработка измерений
+указаниям, получение справочных данных, анализ фото и видео опыта, обработка измерений
 (статистика, коэффициент Стьюдента, МНК, графики), оформление отчета и тренировочная защита.
 
 ### Как устроен ассистент
@@ -66,8 +73,23 @@ ABOUT = """
   вычисляемые столбцы.
 - **Экзаменатор**: генерирует контрольные вопросы и оценивает ответы по шкале 0...10.
 - **Контекстное окно**: последние сообщения в пределах бюджета токенов и резюме вытесненной истории.
-- **Модальности**: текст, изображения (анализ, генерация графиков и блок-схем),
-  речь (Whisper и синтез голоса).
+- **Модальности**: текст, изображения (анализ фото, схем и осциллограмм, генерация графиков
+  и блок-схем), видео (раскадровка и распознавание речи из ролика), речь (Whisper и синтез
+  голоса).
+- **Отчет**: черновик по методичке и требованиям кафедры с таблицей измерений, графиком,
+  рисунками из методички и фотографиями студента, экспорт в DOCX.
+
+### Соответствие заданию
+| Требование | Как выполнено |
+|---|---|
+| Веб-приложение или чат-бот | веб-интерфейс Gradio: чат и вкладки обработки данных и отчета |
+| Элементы управления | режим работы, модель, температура, контекстное окно, top-k, голос |
+| Ввод и генерация текста | диалог с моделью, ответы с формулами и ссылками на источники |
+| Еще одна модальность | изображения, речь и видео |
+| Внешние данные | интернет, методички и файлы (PDF, DOCX, PPTX и др.), таблицы CSV и XLSX |
+| Контекстное окно (LangChain) | последние сообщения по бюджету токенов и резюме истории |
+| Не менее двух цепочек | 12 цепочек LCEL |
+| RAG, два агента или открытая LLM | все три: RAG по методичкам, два агента, модели Ollama |
 
 ### Модели
 OpenAI-совместимый API или открытые LLM через Ollama (Qwen2.5, Llama 3.1, Gemma 3).
@@ -106,7 +128,25 @@ def make_options(
     )
 
 
-def render(reply: Reply) -> list[dict]:
+FILE_ROUTE = "/gradio_api/file="
+
+
+def served(text: str, find_image: Callable[[str], Path | None], captions: bool = False) -> str:
+
+    def link(match) -> str:
+        ref = match.group(2) or match.group(3)
+        if ref.startswith(("http://", "https://", "data:")):
+            return match.group(0)
+        path = find_image(ref)
+        if path is None:
+            return f"*{match.group(1)}*" if match.group(1).strip() else ""
+        image = f"![{match.group(1)}]({FILE_ROUTE}{quote(str(path))})"
+        return f"{image}\n\n*{match.group(1)}*" if captions and match.group(1) else image
+
+    return IMAGE.sub(link, text)
+
+
+def render(reply: Reply, find_image: Callable[[str], Path | None] | None = None) -> list[dict]:
     messages = [
         {
             "role": "assistant",
@@ -115,7 +155,9 @@ def render(reply: Reply) -> list[dict]:
         }
         for step in reply.steps
     ]
-    text = prettify_math(reply.text) or "⏳ Обрабатываю запрос..."
+    text = prettify_math(reply.text) or "Обрабатываю запрос..."
+    if find_image is not None:
+        text = served(text, find_image)
     messages.append({"role": "assistant", "content": text})
     messages += [{"role": "assistant", "content": {"path": path}} for path in reply.images]
     if reply.sources:
@@ -123,7 +165,7 @@ def render(reply: Reply) -> list[dict]:
             {
                 "role": "assistant",
                 "content": "\n".join(f"- {s}" for s in reply.sources),
-                "metadata": {"title": "📚 Использованные фрагменты методичек", "status": "done"},
+                "metadata": {"title": "Использованные фрагменты методичек", "status": "done"},
             }
         )
     return messages
@@ -176,7 +218,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
         session = gr.State(make_session)
 
         with gr.Sidebar(width=360):
-            gr.Markdown("### ⚙️ Управление ассистентом")
+            gr.Markdown("### Управление ассистентом")
             mode = gr.Radio(
                 [(label, key) for key, label in MODES.items()], value="auto", label="Режим работы"
             )
@@ -186,7 +228,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 label="Текущая лабораторная работа (для отчета, защиты и схем)",
                 allow_custom_value=True,
             )
-            with gr.Accordion("🧠 Языковая модель", open=False):
+            with gr.Accordion("Языковая модель", open=False):
                 provider = gr.Dropdown(
                     list(PROVIDERS),
                     value=settings.provider,
@@ -194,7 +236,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 )
                 model = gr.Textbox(settings.chat_model, label="Модель")
                 temperature = gr.Slider(0, 1, settings.temperature, step=0.05, label="Температура")
-            with gr.Accordion("🪟 Контекстное окно", open=True):
+            with gr.Accordion("Контекстное окно", open=True):
                 num_ctx = gr.Slider(
                     2048,
                     32768,
@@ -210,8 +252,8 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 summary_box = gr.Textbox(
                     label="Резюме вытесненной истории", lines=3, interactive=False
                 )
-                clear_btn = gr.Button("🧹 Очистить диалог")
-            with gr.Accordion("📚 База знаний (RAG)", open=False):
+                clear_btn = gr.Button("Очистить диалог")
+            with gr.Accordion("База знаний (RAG)", open=False):
                 top_k = gr.Slider(
                     1, 10, settings.top_k, step=1, label="Фрагментов в контексте (top-k)"
                 )
@@ -221,20 +263,20 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                     label="Добавить методические указания и другие документы",
                 )
                 kb_info = gr.Markdown(assistant.kb.describe())
-                forget_btn = gr.Button("🗑 Забыть загруженные файлы", size="sm")
-            with gr.Accordion("🎙️ Голос, интернет, защита", open=False):
+                forget_btn = gr.Button("Забыть загруженные файлы", size="sm")
+            with gr.Accordion("Голос, интернет, защита", open=False):
                 speak = gr.Checkbox(False, label="Озвучивать и ответы на вопросы, заданные текстом")
                 voices = list(VOICES.items())
                 if settings.tts_voice not in VOICES.values():
                     voices.append((settings.tts_voice, settings.tts_voice))
                 voice = gr.Radio(voices, value=settings.tts_voice, label="Голос озвучки")
-                check_voice = gr.Button("🔊 Проверить голос", size="sm")
+                check_voice = gr.Button("Проверить голос", size="sm")
                 allow_web = gr.Checkbox(True, label="Разрешить поиск в интернете")
                 exam_n = gr.Slider(3, 10, 5, step=1, label="Число вопросов на защите")
 
-        gr.Markdown(f"## 🔬 {TITLE}: {SUBTITLE}")
+        gr.Markdown(f"## {TITLE}: {SUBTITLE}")
         with gr.Tabs():
-            with gr.Tab("💬 Диалог"):
+            with gr.Tab("Диалог"):
                 chatbot = gr.Chatbot(
                     height=540,
                     placeholder=PLACEHOLDER,
@@ -254,14 +296,14 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                     voice_in = gr.Audio(
                         sources=["microphone"],
                         type="filepath",
-                        label="🎤 Вопрос голосом",
+                        label="Вопрос голосом",
                         buttons=[],
                         editable=False,
                         elem_id="voice-input",
                         scale=3,
                     )
                     answer_audio = gr.Audio(
-                        label="🔊 Ответ голосом",
+                        label="Ответ голосом",
                         autoplay=True,
                         interactive=False,
                         elem_id="voice-answer",
@@ -269,7 +311,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                     )
                 speech_info = gr.Markdown(elem_id="speech-status")
                 speech_timer = gr.Timer(3)
-            with gr.Tab("📊 Обработка данных"):
+            with gr.Tab("Обработка данных"):
                 with gr.Row():
                     with gr.Column(scale=1, min_width=300):
                         table_file = gr.File(
@@ -289,26 +331,39 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                         formula = gr.Textbox(
                             label="Вычисляемый столбец", placeholder="R, Ом = U_В / I_мА * 1000"
                         )
-                        add_btn = gr.Button("➕ Добавить столбец")
-                        analyze_btn = gr.Button("📈 Обработать", variant="primary")
-                        explain_btn = gr.Button("🧠 Сформулировать выводы (LLM)")
+                        add_btn = gr.Button("Добавить столбец")
+                        analyze_btn = gr.Button("Обработать", variant="primary")
+                        explain_btn = gr.Button("Сформулировать выводы (LLM)")
                     with gr.Column(scale=2):
                         table_view = gr.Dataframe(label="Данные", interactive=False, max_height=260)
                         plot = gr.Image(label="График", type="filepath", height=380)
                         results = gr.Markdown(latex_delimiters=LATEX_DELIMITERS)
                         insight = gr.Markdown(latex_delimiters=LATEX_DELIMITERS)
-            with gr.Tab("📝 Отчет"):
+            with gr.Tab("Отчет"):
                 gr.Markdown(
-                    "Черновик отчета строится по методичке выбранной работы и результатам "
-                    "обработки данных."
+                    "Черновик отчета строится по методичке выбранной работы, результатам "
+                    "обработки данных и вашим материалам. Рисунки из методички, таблица "
+                    "измерений и график вставляются в отчет сами и нумеруются по требованиям "
+                    "кафедры."
                 )
-                notes = gr.Textbox(
-                    lines=4, label="Заметки студента: условия опыта, наблюдения, замечания"
-                )
+                with gr.Row():
+                    notes = gr.Textbox(
+                        lines=5, label="Заметки студента: условия опыта, наблюдения, замечания"
+                    )
+                    with gr.Column():
+                        report_images = gr.File(
+                            file_count="multiple",
+                            file_types=["image"],
+                            label="Фото и рисунки для отчета: установка, схема, осциллограммы",
+                        )
+                        figure_notes = gr.Textbox(
+                            lines=2,
+                            label="Подписи к рисункам по одной на строку, иначе их даст модель",
+                        )
                 report_btn = gr.Button("Сформировать черновик отчета", variant="primary")
                 report_file = gr.File(label="Отчет в формате DOCX")
                 report_md = gr.Markdown(latex_delimiters=LATEX_DELIMITERS)
-            with gr.Tab("ℹ️ О проекте"):
+            with gr.Tab("О проекте"):
                 gr.Markdown(ABOUT)
 
         option_inputs = [
@@ -331,13 +386,9 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             assistant.apply_context(sess, options)
             history = list(history or [])
             files = (message or {}).get("files") or []
-            attached = [
-                Path(f).name for f in files if Path(f).suffix.lower() not in AUDIO_EXTENSIONS
-            ]
+            attached = [Path(f).name for f in files if not is_voice(f)]
             if files:
-                status = (
-                    "📎 Читаю файлы: " + ", ".join(attached) if attached else "🎤 Распознаю речь"
-                )
+                status = "Читаю файлы: " + ", ".join(attached) if attached else "Распознаю речь"
                 yield (
                     [*history, {"role": "assistant", "content": f"{status}..."}],
                     "busy",
@@ -356,22 +407,26 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             for image in got.images:
                 history.append({"role": "user", "content": {"path": image}})
             for name in attached:
-                if Path(name).suffix.lower() not in IMAGE_EXTENSIONS:
-                    history.append({"role": "user", "content": f"📎 {name}"})
+                if name in got.videos:
+                    history.append({"role": "user", "content": f"Видео: {name}"})
+                elif Path(name).suffix.lower() not in IMAGE_EXTENSIONS:
+                    history.append({"role": "user", "content": f"Файл: {name}"})
             if text:
                 history.append({"role": "user", "content": text})
             if got.speech:
-                history.append({"role": "user", "content": f"🎤 {got.speech}"})
+                history.append({"role": "user", "content": f"Голосом: {got.speech}"})
             for note in got.notes:
                 history.append(
                     {
                         "role": "assistant",
                         "content": note,
-                        "metadata": {"title": "📎 Вложения", "status": "done"},
+                        "metadata": {"title": "Вложения", "status": "done"},
                     }
                 )
             if got.speech_error:
-                history.append({"role": "assistant", "content": f"⚠️ {got.speech_error}"})
+                history.append({"role": "assistant", "content": got.speech_error})
+            if not question and got.videos:
+                question = VIDEO_REQUEST.format(names=", ".join(got.videos))
             if not question and got.documents:
                 question = SUMMARY_REQUEST.format(names=", ".join(got.documents))
             if not question and not got.images:
@@ -385,12 +440,13 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             reply = Reply()
             audio = fresh_audio(None)
             for reply in assistant.respond(sess, question, options, got.images):
-                yield history + render(reply), "busy", audio, *context_outputs(sess), *tables
+                shown = render(reply, assistant.find_image)
+                yield history + shown, "busy", audio, *context_outputs(sess), *tables
                 audio, tables = gr.skip(), [gr.skip()] * 4
             voiced = (speak_on or bool(got.speech)) and not reply.error
             audio = assistant.speak(reply.text, voice_id) if voiced else None
             yield (
-                history + render(reply),
+                history + render(reply, assistant.find_image),
                 "ready",
                 fresh_audio(audio),
                 *context_outputs(sess),
@@ -535,17 +591,22 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
 
         explain_btn.click(on_explain, [session, *option_inputs], insight)
 
-        def on_report(sess, notes_text, *values):
+        def on_report(sess, notes_text, images, captions, *values):
             options = make_options(*values)
             if not options.lab:
                 raise gr.Error("Выберите лабораторную работу в боковой панели")
             try:
-                markdown, path = assistant.make_report(sess, options, notes_text)
+                figures = assistant.report_figures(images or [], captions, options)
+                markdown, path = assistant.make_report(sess, options, notes_text, figures)
             except Exception as exc:
                 raise gr.Error(str(exc)) from exc
-            return path, prettify_math(markdown)
+            return path, served(prettify_math(markdown), assistant.find_image, captions=True)
 
-        report_btn.click(on_report, [session, notes, *option_inputs], [report_file, report_md])
+        report_btn.click(
+            on_report,
+            [session, notes, report_images, figure_notes, *option_inputs],
+            [report_file, report_md],
+        )
 
     return demo
 
@@ -554,5 +615,10 @@ def launch_options(settings: Settings) -> dict:
     font = [gr.themes.LocalFont("IBM Plex Sans"), "Arial", "sans-serif"]
     return {
         "theme": gr.themes.Soft(primary_hue="blue", secondary_hue="sky", font=font),
-        "allowed_paths": [str(settings.output_dir), str(PROJECT_DIR / "data")],
+        "allowed_paths": [
+            str(settings.output_dir),
+            str(PROJECT_DIR / "data"),
+            str(settings.manuals_dir),
+            str(settings.uploads_dir),
+        ],
     }

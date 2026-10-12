@@ -9,7 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from labmentor.assistant import LabAssistant, Options, Reply
+from docx import Document
+
+from labmentor.assistant import VIDEO_REQUEST, LabAssistant, Options, Reply
 from labmentor.config import Settings, use_system_certificates
 from labmentor.data_analysis import add_column, parse_column_spec
 from labmentor.llm import check_setup
@@ -115,6 +117,16 @@ def scenario_vision(assistant):
     return reply.text
 
 
+def scenario_video(assistant):
+    session = assistant.new_session()
+    got = assistant.ingest(session, [str(SAMPLES / "rc_discharge.mp4")], Options())
+    assert got.videos == ["rc_discharge.mp4"], f"видео не прочитано: {got.notes}"
+    question = VIDEO_REQUEST.format(names="rc_discharge.mp4") + " Оцени постоянную времени."
+    reply = ask(assistant, session, question, image=got.images)
+    assert reply.route == "vision", f"ответил исполнитель {reply.route}"
+    return f"{got.notes[0]}\n{reply.text}"
+
+
 def scenario_exam(assistant):
     session = assistant.new_session()
     first = ask(assistant, session, "Проверь меня по работе 1.1", mode="exam", exam_questions=3)
@@ -144,9 +156,12 @@ def scenario_report(assistant):
     column = add_column(session.data.df, *parse_column_spec("ln_I = ln(I_мА)"))
     assistant.analyze(session, "U_В", column, 1, 0.95, None)
     options = Options(lab=lab_title(assistant, "1.1"))
-    markdown, path = assistant.make_report(session, options, "Опыт при 22 °C")
+    figures = assistant.report_figures([str(SAMPLES / "rc_oscillogram.png")], "", options)
+    markdown, path = assistant.make_report(session, options, "Опыт при 22 °C", figures)
     assert "Вывод" in markdown, "в отчете нет выводов"
-    return path
+    pictures = len(Document(path).inline_shapes)
+    assert pictures >= 2, f"в отчете {pictures} рисунков вместо графика и фото"
+    return f"{path}; рисунков: {pictures}; подпись к фото: {figures[0][1]}"
 
 
 def scenario_speech(assistant):
@@ -168,6 +183,7 @@ SCENARIOS = [
     ("Агент-исследователь (интернет)", scenario_research_agent, True),
     ("Блок-схема", scenario_flowchart, False),
     ("Анализ изображения", scenario_vision, False),
+    ("Анализ видео", scenario_video, False),
     ("Тренировочная защита", scenario_exam, False),
     ("Контекстное окно и резюме", scenario_context, False),
     ("Отчет DOCX", scenario_report, False),

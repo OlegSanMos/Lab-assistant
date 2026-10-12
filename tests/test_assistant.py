@@ -34,8 +34,8 @@ def test_data_agent_calls_tools_and_plots(assistant, sample):
     reply = run(assistant, session, "Построй график I(U) и найди сопротивление")
     assert reply.route == "data"
     assert [step["title"] for step in reply.steps[1:]] == [
-        "🔧 Инструмент describe_data",
-        "🔧 Инструмент fit_dependency",
+        "Инструмент describe_data",
+        "Инструмент fit_dependency",
     ]
     assert "Результат: МНК-аппроксимация" in reply.steps[2]["content"]
     assert len(reply.images) == 1 and Path(reply.images[0]).exists()
@@ -52,7 +52,7 @@ def test_research_agent_uses_manual_search(assistant):
         assistant, assistant.new_session(), "Найди в интернете модуль Юнга", allow_web=False
     )
     assert reply.route == "research"
-    assert reply.steps[1]["title"] == "🔧 Инструмент search_lab_manuals"
+    assert reply.steps[1]["title"] == "Инструмент search_lab_manuals"
     assert "Лабораторная работа № 2" in reply.steps[1]["content"]
 
 
@@ -144,6 +144,6 @@ def test_ui_builds_and_renders(assistant):
     session = assistant.new_session()
     reply = run(assistant, session, "Какова цель работы № 1?")
     messages = render(reply)
-    assert messages[0]["metadata"]["title"] == "🧭 Диспетчер"
-    assert messages[-1]["metadata"]["title"].startswith("📚")
+    assert messages[0]["metadata"]["title"] == "Диспетчер"
+    assert messages[-1]["metadata"]["title"] == "Использованные фрагменты методичек"
     assert "из 2000 токенов" in context_outputs(session)[0]
