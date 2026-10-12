@@ -107,6 +107,8 @@ class DataWorkspace:
     images: list[str] = field(default_factory=list)
     last_results: str = ""
     last_plot: str | None = None
+    insight: str = ""
+    insight_lab: str = ""
 
 
 def student_t(dof: int, p: float = 0.95) -> float:
@@ -329,6 +331,13 @@ def safe_eval(expression: str, variables: dict | None = None):
         raise ValueError("Недопустимый элемент выражения")
 
     return evaluate(ast.parse(expression.replace("^", "**"), mode="eval"))
+
+
+def table_text(df: pd.DataFrame, limit: int = 40) -> str:
+    labels = df.attrs.get("labels", {})
+    shown = df.head(limit).rename(columns=lambda column: labels.get(column, column))
+    text = shown.to_string(index=False, float_format=lambda value: f"{value:.6g}")
+    return text if len(df) <= limit else f"{text}\nи еще строк: {len(df) - limit}"
 
 
 def add_column(df: pd.DataFrame, name: str, formula: str) -> str:

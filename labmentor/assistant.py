@@ -28,6 +28,7 @@ from .data_analysis import (
     fit_polynomial,
     format_stats,
     load_table,
+    table_text,
 )
 from .graphics import draw_flowchart, plot_fit
 from .knowledge import KnowledgeBase, format_docs, load_file
@@ -72,6 +73,13 @@ MODES = {
     "chat": "Свободный диалог",
 }
 STOP_WORDS = {"стоп", "хватит", "закончить", "завершить", "stop"}
+LAB_QUERIES = (
+    "цели работы",
+    "уравнение зависимость формула {hints}",
+    "расчет параметров по результатам измерений",
+    "подготовка отчета требования к отчету выводы",
+)
+LAB_CONTEXT = 9000
 
 
 @dataclass
@@ -705,20 +713,38 @@ class LabAssistant:
         if stat_column:
             results.append(format_stats(column_stats(df, stat_column, p)))
         session.data.last_plot, session.data.last_results = plot, "\n\n".join(results)
+        session.data.insight = session.data.insight_lab = ""
         return plot, session.data.last_results
 
+    def lab_context(self, title: str, hints: str = "") -> str:
+        sources = {name for name, lab in self.kb.titles.items() if lab == title}
+        if not sources:
+            return format_docs(self.kb.search(f"{title} обработка результатов {hints}", 6))
+        docs = []
+        for query in LAB_QUERIES:
+            for doc in self.kb.search(query.format(hints=hints), 3, only=sources):
+                if all(doc is not seen for seen in docs):
+                    docs.append(doc)
+        docs.sort(key=lambda doc: doc.metadata.get("chunk", 0))
+        return format_docs(docs)[:LAB_CONTEXT]
+
     def explain_results(self, session: Session, options: Options) -> str:
-        if not session.data.last_results:
+        data = session.data
+        if not data.last_results or data.df is None:
             raise ValueError("Сначала выполните обработку данных")
-        docs = self.kb.search(f"{options.lab} обработка результатов", options.top_k)
-        return chains.build_insight_chain(self.llm(options)).invoke(
+        labels = data.df.attrs.get("labels", {})
+        hints = " ".join(str(labels.get(column, column)) for column in data.df.columns)
+        text = chains.build_insight_chain(self.llm(options)).invoke(
             {
                 "lab": options.lab or "не указана",
-                "table": session.data.name,
-                "results": session.data.last_results,
-                "context": format_docs(docs),
+                "table": data.name,
+                "data": table_text(data.df),
+                "results": data.last_results,
+                "context": self.lab_context(options.lab, hints),
             }
         )
+        data.insight, data.insight_lab = text, options.lab
+        return text
 
     def manual_text(self, title: str) -> str:
         chunks = [c.page_content for c in self.kb.chunks if c.metadata.get("title") == title]
@@ -780,12 +806,15 @@ class LabAssistant:
         figures: list[tuple[str, str]] = (),
     ) -> tuple[str, str]:
         table, plot = session.data.df, session.data.last_plot
+        results = session.data.last_results or "обработка данных не выполнялась"
+        if session.data.insight and session.data.insight_lab == options.lab:
+            results += f"\n\nВыводы по результатам, сформулированные ранее:\n{session.data.insight}"
         draft = chains.build_report_chain(self.llm(options)).invoke(
             {
                 "lab": options.lab,
                 "manual": self.manual_text(options.lab),
                 "notes": notes or "нет",
-                "results": session.data.last_results or "обработка данных не выполнялась",
+                "results": results,
                 "inserts": report_inserts(table, plot, figures),
             }
         )

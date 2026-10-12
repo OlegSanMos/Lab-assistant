@@ -168,6 +168,11 @@ def test_data_tab_endpoints(client, tmp_path):
     plot, results = client.predict("U_В", "I_мА", 1, 0.95, "R_Ом", api_name="/on_analyze")
     assert plot.endswith(".png")
     assert "R² = 0.9999" in results and "Результат: R_Ом = 101.34 ± 0.32, P = 0.95" in results
+    with pytest.raises(Exception, match="Выберите лабораторную работу, по которой нужны выводы"):
+        client.predict(None, *OPTIONS, api_name="/on_explain")
+    insight = client.predict(LAB_1, *OPTIONS, api_name="/on_explain")
+    assert insight.startswith(f"#### Выводы по работе «{LAB_1}»")
+    assert "R = 1/k = 101,5 Ом" in insight
     photo = tmp_path / "setup.png"
     Image.new("RGB", (60, 40), "red").save(photo)
     report, markdown = client.predict(

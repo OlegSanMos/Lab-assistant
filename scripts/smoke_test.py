@@ -84,6 +84,16 @@ def scenario_data_agent(assistant):
     return f"инструменты: {', '.join(t.split()[-1] for t in tools[1:])}; график: {reply.images[0]}"
 
 
+def scenario_conclusions(assistant):
+    session = assistant.new_session()
+    assistant.load_table(session, SAMPLES / "diode_iv.csv")
+    column = add_column(session.data.df, *parse_column_spec("ln_I = ln(I_мА)"))
+    assistant.analyze(session, "U_В", column, 1, 0.95, None)
+    text = assistant.explain_results(session, Options(lab=lab_title(assistant, "1.1")))
+    assert text.strip(), "выводы не сформулированы"
+    return text
+
+
 def scenario_research_agent(assistant):
     reply = ask(
         assistant,
@@ -180,6 +190,7 @@ SCENARIOS = [
     ("Диспетчер (router_chain)", scenario_router, False),
     ("RAG по методичке", scenario_rag, False),
     ("Агент-аналитик и график", scenario_data_agent, False),
+    ("Выводы по лабораторной работе", scenario_conclusions, False),
     ("Агент-исследователь (интернет)", scenario_research_agent, True),
     ("Блок-схема", scenario_flowchart, False),
     ("Анализ изображения", scenario_vision, False),

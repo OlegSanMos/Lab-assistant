@@ -14,7 +14,7 @@ from conftest import (
 )
 from labmentor.assistant import LabAssistant
 from labmentor.config import Settings
-from labmentor.ui import INPUT_HINT, build_ui, launch_options
+from labmentor.ui import INPUT_HINT, LAB_LABEL, build_ui, launch_options
 
 sync_api = pytest.importorskip("playwright.sync_api")
 INPUT = INPUT_HINT
@@ -117,6 +117,34 @@ def test_page_has_controls(page):
     visible(page, "Здравствуйте! Я ЛабМентор")
 
 
+def test_main_blocks_have_icons(page):
+    selectors = [
+        "#app-title h2",
+        "#side-title h3",
+        "#acc-model > .label-wrap > span:first-child",
+        "#acc-context > .label-wrap > span:first-child",
+        "#tab-dialog-button",
+        "#tab-data-button",
+        "#tab-report-button",
+        "#tab-about-button",
+        "#btn-clear",
+    ]
+    icons = page.evaluate(
+        """selectors => selectors.map(selector => {
+            const style = getComputedStyle(document.querySelector(selector), "::before");
+            return [style.maskImage || style.webkitMaskImage, parseFloat(style.width)];
+        })""",
+        selectors,
+    )
+    assert all(mask.startswith('url("data:image/svg+xml') and width > 10 for mask, width in icons)
+    page.get_by_role("tab", name="Обработка данных").click()
+    sync_api.expect(page.locator("#btn-explain")).to_be_visible()
+    mask = page.evaluate(
+        "() => getComputedStyle(document.querySelector('#btn-explain'), '::before').maskImage"
+    )
+    assert mask.startswith('url("data:image/svg+xml')
+
+
 def test_chat_rag_answer_with_sources(page):
     ask(page, "Какова цель лабораторной работы № 1?")
     visible(page, "Цель работы: проверить закон Ома")
@@ -169,7 +197,7 @@ def test_video_is_watched_in_chat(page, monkeypatch, tmp_path):
 def test_report_has_real_pictures(page, tmp_path):
     photo = tmp_path / "stand.jpg"
     Image.new("RGB", (640, 480), (40, 90, 160)).save(photo)
-    page.get_by_label("Текущая лабораторная работа (для отчета, защиты и схем)").click()
+    page.get_by_label(LAB_LABEL).click()
     page.get_by_role("option", name="Лабораторная работа № 1.", exact=False).first.click()
     page.get_by_role("tab", name="Отчет").click()
     page.locator('input[type=file][accept="image/*"]').set_input_files(str(photo))
@@ -198,6 +226,32 @@ def test_data_processing_tab(page):
     page.get_by_role("button", name="Обработать").click()
     visible(page, "Коэффициент детерминации R² = 0.99998")
     visible(page, "Результат: R_Ом = 101.34 ± 0.32, P = 0.95")
+
+
+def test_conclusions_for_the_lab_chosen_on_data_tab(page):
+    page.get_by_role("tab", name="Обработка данных").click()
+    page.locator('input[type=file][accept=".csv, .tsv, .xlsx"]').set_input_files(
+        str(SAMPLES / "ohm_law.csv")
+    )
+    visible(page, "Загружена таблица ohm_law.csv")
+    page.get_by_role("button", name="Обработать").click()
+    visible(page, "Коэффициент детерминации")
+    explain = page.get_by_role("button", name="Сформулировать выводы (LLM)")
+    explain.click()
+    visible(page, "Выберите лабораторную работу, по которой нужны выводы")
+    choice = page.get_by_label("Лабораторная работа для выводов")
+    choice.click()
+    page.get_by_role("option", name="Лабораторная работа № 1.", exact=False).first.click()
+    first = choice.input_value()
+    sync_api.expect(page.get_by_label(LAB_LABEL)).to_have_value(first)
+    explain.click()
+    visible(page, f"Выводы по работе «{first}»")
+    visible(page, "Зависимость подтверждена")
+    page.get_by_label(LAB_LABEL).click()
+    page.get_by_role("option", name="Лабораторная работа № 2.", exact=False).first.click()
+    second = page.get_by_label(LAB_LABEL).input_value()
+    assert second != first
+    sync_api.expect(choice).to_have_value(second)
 
 
 def test_clear_dialog(page):

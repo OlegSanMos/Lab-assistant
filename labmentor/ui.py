@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
@@ -35,7 +36,34 @@ from .speech import (
 )
 from .video import is_voice
 
+STATIC = Path(__file__).resolve().parent / "static"
+ICONS = {
+    "#app-title h2": "flask-conical",
+    "#side-title h3": "sliders-horizontal",
+    "#acc-model > .label-wrap > span:first-child": "brain",
+    "#acc-context > .label-wrap > span:first-child": "app-window",
+    "#acc-kb > .label-wrap > span:first-child": "library",
+    "#acc-voice > .label-wrap > span:first-child": "audio-lines",
+    "#tab-dialog-button": "messages-square",
+    "#tab-data-button": "chart-line",
+    "#tab-report-button": "file-text",
+    "#tab-about-button": "info",
+    "#btn-clear": "brush-cleaning",
+    "#btn-forget": "trash-2",
+    "#btn-check-voice": "volume-2",
+    "#btn-add-column": "plus",
+    "#btn-analyze": "calculator",
+    "#btn-explain": "sparkles",
+    "#btn-report": "file-pen",
+}
+ICON_STYLE = (
+    "content:'';display:inline-block;flex-shrink:0;width:1.15em;height:1.15em;"
+    "margin-right:.45em;vertical-align:-.2em;background-color:currentColor;"
+    "-webkit-mask-position:center;mask-position:center;-webkit-mask-size:contain;"
+    "mask-size:contain;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat"
+)
 TITLE = "ЛабМентор"
+LAB_LABEL = "Текущая лабораторная работа (для выводов, отчета, защиты и схем)"
 SUBTITLE = "виртуальный ассистент лабораторного практикума по инженерным дисциплинам"
 PLACEHOLDER = (
     "### Здравствуйте! Я ЛабМентор\n"
@@ -94,6 +122,15 @@ ABOUT = """
 ### Модели
 OpenAI-совместимый API или открытые LLM через Ollama (Qwen2.5, Llama 3.1, Gemma 3).
 """
+
+
+def icon_css() -> str:
+    rules = [",".join(f"{selector}::before" for selector in ICONS) + "{" + ICON_STYLE + "}"]
+    for selector, name in ICONS.items():
+        data = base64.b64encode((STATIC / "icons" / f"{name}.svg").read_bytes()).decode()
+        image = f'url("data:image/svg+xml;base64,{data}")'
+        rules.append(f"{selector}::before{{-webkit-mask-image:{image};mask-image:{image}}}")
+    return "\n".join(rules)
 
 
 def fresh_audio(path: str | None):
@@ -218,17 +255,17 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
         session = gr.State(make_session)
 
         with gr.Sidebar(width=360):
-            gr.Markdown("### Управление ассистентом")
+            gr.Markdown("### Управление ассистентом", elem_id="side-title")
             mode = gr.Radio(
                 [(label, key) for key, label in MODES.items()], value="auto", label="Режим работы"
             )
             lab = gr.Dropdown(
                 labs,
                 value=None,
-                label="Текущая лабораторная работа (для отчета, защиты и схем)",
+                label=LAB_LABEL,
                 allow_custom_value=True,
             )
-            with gr.Accordion("Языковая модель", open=False):
+            with gr.Accordion("Языковая модель", open=False, elem_id="acc-model"):
                 provider = gr.Dropdown(
                     list(PROVIDERS),
                     value=settings.provider,
@@ -236,7 +273,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 )
                 model = gr.Textbox(settings.chat_model, label="Модель")
                 temperature = gr.Slider(0, 1, settings.temperature, step=0.05, label="Температура")
-            with gr.Accordion("Контекстное окно", open=True):
+            with gr.Accordion("Контекстное окно", open=True, elem_id="acc-context"):
                 num_ctx = gr.Slider(
                     2048,
                     32768,
@@ -252,8 +289,8 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                 summary_box = gr.Textbox(
                     label="Резюме вытесненной истории", lines=3, interactive=False
                 )
-                clear_btn = gr.Button("Очистить диалог")
-            with gr.Accordion("База знаний (RAG)", open=False):
+                clear_btn = gr.Button("Очистить диалог", elem_id="btn-clear")
+            with gr.Accordion("База знаний (RAG)", open=False, elem_id="acc-kb"):
                 top_k = gr.Slider(
                     1, 10, settings.top_k, step=1, label="Фрагментов в контексте (top-k)"
                 )
@@ -263,20 +300,20 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                     label="Добавить методические указания и другие документы",
                 )
                 kb_info = gr.Markdown(assistant.kb.describe())
-                forget_btn = gr.Button("Забыть загруженные файлы", size="sm")
-            with gr.Accordion("Голос, интернет, защита", open=False):
+                forget_btn = gr.Button("Забыть загруженные файлы", size="sm", elem_id="btn-forget")
+            with gr.Accordion("Голос, интернет, защита", open=False, elem_id="acc-voice"):
                 speak = gr.Checkbox(False, label="Озвучивать и ответы на вопросы, заданные текстом")
                 voices = list(VOICES.items())
                 if settings.tts_voice not in VOICES.values():
                     voices.append((settings.tts_voice, settings.tts_voice))
                 voice = gr.Radio(voices, value=settings.tts_voice, label="Голос озвучки")
-                check_voice = gr.Button("Проверить голос", size="sm")
+                check_voice = gr.Button("Проверить голос", size="sm", elem_id="btn-check-voice")
                 allow_web = gr.Checkbox(True, label="Разрешить поиск в интернете")
                 exam_n = gr.Slider(3, 10, 5, step=1, label="Число вопросов на защите")
 
-        gr.Markdown(f"## {TITLE}: {SUBTITLE}")
+        gr.Markdown(f"## {TITLE}: {SUBTITLE}", elem_id="app-title")
         with gr.Tabs():
-            with gr.Tab("Диалог"):
+            with gr.Tab("Диалог", elem_id="tab-dialog"):
                 chatbot = gr.Chatbot(
                     height=540,
                     placeholder=PLACEHOLDER,
@@ -311,7 +348,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                     )
                 speech_info = gr.Markdown(elem_id="speech-status")
                 speech_timer = gr.Timer(3)
-            with gr.Tab("Обработка данных"):
+            with gr.Tab("Обработка данных", elem_id="tab-data"):
                 with gr.Row():
                     with gr.Column(scale=1, min_width=300):
                         table_file = gr.File(
@@ -331,15 +368,25 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                         formula = gr.Textbox(
                             label="Вычисляемый столбец", placeholder="R, Ом = U_В / I_мА * 1000"
                         )
-                        add_btn = gr.Button("Добавить столбец")
-                        analyze_btn = gr.Button("Обработать", variant="primary")
-                        explain_btn = gr.Button("Сформулировать выводы (LLM)")
+                        add_btn = gr.Button("Добавить столбец", elem_id="btn-add-column")
+                        analyze_btn = gr.Button(
+                            "Обработать", variant="primary", elem_id="btn-analyze"
+                        )
+                        data_lab = gr.Dropdown(
+                            labs,
+                            value=None,
+                            label="Лабораторная работа для выводов",
+                            info="Выводы рассчитываются по методичке этой работы",
+                        )
+                        explain_btn = gr.Button(
+                            "Сформулировать выводы (LLM)", elem_id="btn-explain"
+                        )
                     with gr.Column(scale=2):
                         table_view = gr.Dataframe(label="Данные", interactive=False, max_height=260)
                         plot = gr.Image(label="График", type="filepath", height=380)
                         results = gr.Markdown(latex_delimiters=LATEX_DELIMITERS)
                         insight = gr.Markdown(latex_delimiters=LATEX_DELIMITERS)
-            with gr.Tab("Отчет"):
+            with gr.Tab("Отчет", elem_id="tab-report"):
                 gr.Markdown(
                     "Черновик отчета строится по методичке выбранной работы, результатам "
                     "обработки данных и вашим материалам. Рисунки из методички, таблица "
@@ -360,10 +407,12 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                             lines=2,
                             label="Подписи к рисункам по одной на строку, иначе их даст модель",
                         )
-                report_btn = gr.Button("Сформировать черновик отчета", variant="primary")
+                report_btn = gr.Button(
+                    "Сформировать черновик отчета", variant="primary", elem_id="btn-report"
+                )
                 report_file = gr.File(label="Отчет в формате DOCX")
                 report_md = gr.Markdown(latex_delimiters=LATEX_DELIMITERS)
-            with gr.Tab("О проекте"):
+            with gr.Tab("О проекте", elem_id="tab-about"):
                 gr.Markdown(ABOUT)
 
         option_inputs = [
@@ -538,18 +587,27 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             model,
         )
 
+        def lab_lists():
+            return gr.Dropdown(choices=assistant.lab_titles()), gr.Dropdown(
+                choices=assistant.lab_titles()
+            )
+
         def on_kb_upload(files, *values):
             if files:
                 gr.Info("; ".join(assistant.add_uploads(files, make_options(*values))))
-            return assistant.kb.describe(), gr.Dropdown(choices=assistant.lab_titles())
+            return assistant.kb.describe(), *lab_lists()
 
-        kb_upload.upload(on_kb_upload, [kb_upload, *option_inputs], [kb_info, lab])
+        kb_upload.upload(on_kb_upload, [kb_upload, *option_inputs], [kb_info, lab, data_lab])
 
         def on_forget():
             gr.Info(f"Удалено загруженных файлов: {assistant.forget_uploads()}")
-            return assistant.kb.describe(), gr.Dropdown(choices=assistant.lab_titles())
+            return assistant.kb.describe(), *lab_lists()
 
-        forget_btn.click(on_forget, None, [kb_info, lab])
+        forget_btn.click(on_forget, None, [kb_info, lab, data_lab])
+        lab.input(
+            lambda title: title if title in assistant.lab_titles() else gr.skip(), lab, data_lab
+        )
+        data_lab.input(lambda title: title, data_lab, lab)
 
         def on_table(file, sess):
             if not file:
@@ -583,13 +641,18 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             on_analyze, [session, x_col, y_col, degree, confidence, stat_col], [plot, results]
         )
 
-        def on_explain(sess, *values):
+        def on_explain(sess, title, *values):
+            if not title:
+                raise gr.Error("Выберите лабораторную работу, по которой нужны выводы")
+            options = make_options(*values)
+            options.lab = title
             try:
-                return prettify_math(assistant.explain_results(sess, make_options(*values)))
+                text = assistant.explain_results(sess, options)
             except Exception as exc:
                 raise gr.Error(str(exc)) from exc
+            return f"#### Выводы по работе «{title}»\n\n{prettify_math(text)}"
 
-        explain_btn.click(on_explain, [session, *option_inputs], insight)
+        explain_btn.click(on_explain, [session, data_lab, *option_inputs], insight)
 
         def on_report(sess, notes_text, images, captions, *values):
             options = make_options(*values)
@@ -615,6 +678,8 @@ def launch_options(settings: Settings) -> dict:
     font = [gr.themes.LocalFont("IBM Plex Sans"), "Arial", "sans-serif"]
     return {
         "theme": gr.themes.Soft(primary_hue="blue", secondary_hue="sky", font=font),
+        "css": icon_css(),
+        "favicon_path": str(STATIC / "favicon.png"),
         "allowed_paths": [
             str(settings.output_dir),
             str(PROJECT_DIR / "data"),
