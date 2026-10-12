@@ -117,6 +117,24 @@ def test_page_has_controls(page):
     visible(page, "Здравствуйте! Я ЛабМентор")
 
 
+def test_dialog_fills_the_window(page):
+    sizes = """() => ({
+        scroll: document.documentElement.scrollHeight,
+        inner: window.innerHeight,
+        chat: document.querySelector("#chat").getBoundingClientRect().width,
+        sidebar: document.querySelector(".sidebar").getBoundingClientRect().width,
+    })"""
+    for width, height in ((1440, 1000), (1920, 1080), (1280, 800)):
+        page.set_viewport_size({"width": width, "height": height})
+        page.wait_for_function(
+            "() => document.documentElement.scrollHeight <= window.innerHeight + 2",
+            timeout=10_000,
+        )
+        found = page.evaluate(sizes)
+        assert found["chat"] > width - found["sidebar"] - 120
+        assert 300 <= found["sidebar"] <= 420
+
+
 def test_main_blocks_have_icons(page):
     selectors = [
         "#app-title h2",

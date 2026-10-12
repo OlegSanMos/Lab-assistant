@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
@@ -73,6 +74,27 @@ LOADING_CSS = (
     "animation:lm-spin .8s linear infinite}"
     ".lm-loading::before{width:1.4em;height:1.4em;color:var(--color-accent)}"
 )
+CHAT_HEIGHT = "calc(100vh - 470px)"
+CHAT_CSS = (
+    "#chat{height:var(--lm-chat-height," + CHAT_HEIGHT + ") !important}"
+    "#chat .md img{max-height:420px;width:auto;max-width:100%;object-fit:contain}"
+)
+FIT_CHAT = """
+() => {
+  const fit = () => {
+    const chat = document.querySelector("#chat");
+    const status = document.querySelector("#speech-status");
+    if (!chat || !status || !chat.offsetParent) return;
+    const box = chat.getBoundingClientRect();
+    const below = status.getBoundingClientRect().bottom - box.bottom;
+    const height = Math.max(300, window.innerHeight - box.top - window.scrollY - below - 56);
+    document.documentElement.style.setProperty("--lm-chat-height", height + "px");
+  };
+  new ResizeObserver(fit).observe(document.body);
+  window.addEventListener("resize", fit);
+  setTimeout(fit, 300);
+}
+"""
 EXPLAIN = "Сформулировать выводы (LLM)"
 EXPLAIN_WAIT = "Выводы готовятся..."
 TITLE = "ЛабМентор"
@@ -147,7 +169,7 @@ def icon_css() -> str:
 
 
 def interface_css() -> str:
-    return icon_css() + "\n" + LOADING_CSS
+    return "\n".join([icon_css(), LOADING_CSS, CHAT_CSS])
 
 
 def loading_text(title: str) -> str:
@@ -206,7 +228,7 @@ def served(text: str, find_image: Callable[[str], Path | None], captions: bool =
         image = f"![{match.group(1)}]({FILE_ROUTE}{quote(str(path))})"
         return f"{image}\n\n*{match.group(1)}*" if captions and match.group(1) else image
 
-    return IMAGE.sub(link, text)
+    return re.sub(r"(\*[^*\n]+\*)\s*\n\s*\1", r"\1", IMAGE.sub(link, text))
 
 
 def render(reply: Reply, find_image: Callable[[str], Path | None] | None = None) -> list[dict]:
@@ -220,7 +242,7 @@ def render(reply: Reply, find_image: Callable[[str], Path | None] | None = None)
     ]
     text = prettify_math(reply.text) or "Обрабатываю запрос..."
     if find_image is not None:
-        text = served(text, find_image)
+        text = served(text, find_image, captions=True)
     messages.append({"role": "assistant", "content": text})
     messages += [{"role": "assistant", "content": {"path": path}} for path in reply.images]
     if reply.sources:
@@ -277,7 +299,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
     def make_session() -> Session:
         return assistant.new_session()
 
-    with gr.Blocks(title=f"{TITLE}: {SUBTITLE}", fill_height=True) as demo:
+    with gr.Blocks(title=f"{TITLE}: {SUBTITLE}", fill_height=True, fill_width=True) as demo:
         session = gr.State(make_session)
 
         with gr.Sidebar(width=360):
@@ -341,7 +363,9 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
         with gr.Tabs():
             with gr.Tab("Диалог", elem_id="tab-dialog"):
                 chatbot = gr.Chatbot(
-                    height=540,
+                    height=CHAT_HEIGHT,
+                    min_height=300,
+                    elem_id="chat",
                     placeholder=PLACEHOLDER,
                     examples=EXAMPLES,
                     label="Диалог с ассистентом",
@@ -713,6 +737,7 @@ def launch_options(settings: Settings) -> dict:
     return {
         "theme": gr.themes.Soft(primary_hue="blue", secondary_hue="sky", font=font),
         "css": interface_css(),
+        "js": FIT_CHAT,
         "favicon_path": str(STATIC / "favicon.png"),
         "allowed_paths": [
             str(settings.output_dir),

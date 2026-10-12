@@ -42,6 +42,14 @@ _cyrillic_re = re.compile("[а-яё]")
 _lab_number_re = re.compile(
     r"(?:\bлр|работ\w*)\s*[-№]?\s*(?:номер\s*)?(\d+(?:\.\d+)?)", re.IGNORECASE
 )
+_section_re = re.compile(r"(?m)^(#{1,4})\s+(.+?)\s*$")
+OVERVIEW_PARTS = (
+    (r"цел[иь]", 2000),
+    (r"задани|порядок выполнения|ход работы", 8000),
+    (r"отч[её]т", 2000),
+    (r"стенд|макетн|оборудован", 1500),
+    (r"теорет", 1500),
+)
 
 
 def lab_number(title: str) -> str:
@@ -53,6 +61,42 @@ def same_lab(asked: str, number: str) -> bool:
     if not number:
         return False
     return asked == number or ("." not in asked and number.rsplit(".", 1)[-1] == asked)
+
+
+def sections(text: str) -> list[tuple[int, int, str, str]]:
+    heads = [(m.start(), len(m.group(1)), m.group(2)) for m in _section_re.finditer(text)]
+    found = []
+    for index, (start, level, title) in enumerate(heads):
+        end = next((s for s, deeper, _ in heads[index + 1 :] if deeper <= level), len(text))
+        found.append((start, level, title, text[start:end].strip()))
+    return found
+
+
+def _clip(text: str, size: int) -> str:
+    if len(text) <= size:
+        return text
+    cut = text.rfind("\n\n", 0, size)
+    return text[: cut if cut > size // 2 else size].rstrip() + "\n..."
+
+
+def overview(text: str, budget: int = 12000) -> str:
+    found = [s for s in sections(text) if s[1] >= 2]
+    if not found:
+        return _clip(text, budget)
+    top = min(level for _, level, _, _ in found)
+    main = [
+        s
+        for s in found
+        if s[1] == top and not re.search(r"контрольн|литератур|содержани", s[2], re.I)
+    ]
+    picked, left = {}, budget
+    for pattern, cap in OVERVIEW_PARTS:
+        for start, _, title, body in main:
+            if left <= 0 or start in picked or not re.search(pattern, title, re.I):
+                continue
+            piece = _clip(body, min(cap, left))
+            picked[start], left = piece, left - len(piece)
+    return "\n\n".join(picked[start] for start in sorted(picked))
 
 
 def tokenize(text: str) -> list[str]:
@@ -196,11 +240,12 @@ class HybridRetriever(BaseRetriever):
     k: int = 4
     only: set[str] | None = None
     prefer: set[str] | None = None
+    extra: list[Document] = []
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> list[Document]:
-        return self.kb.search(query, self.k, only=self.only, prefer=self.prefer)
+        return self.extra + self.kb.search(query, self.k, only=self.only, prefer=self.prefer)
 
 
 class KnowledgeBase:
@@ -215,6 +260,7 @@ class KnowledgeBase:
         )
         self.chunks: list[Document] = []
         self.titles: dict[str, str] = {}
+        self.texts: dict[str, str] = {}
         self.vector_store: InMemoryVectorStore | None = None
         self.vector_error = ""
         self._bm25: BM25Okapi | None = None
@@ -247,6 +293,7 @@ class KnowledgeBase:
         self.chunks = [c for c in self.chunks if c.metadata["source"] not in names]
         for name in names:
             self.titles.pop(name, None)
+            self.texts.pop(name, None)
         self._rebuild_index()
 
     def _add(self, name: str, docs: list[Document]) -> str:
@@ -255,6 +302,7 @@ class KnowledgeBase:
         self.chunks = [c for c in self.chunks if c.metadata["source"] != name]
         title = self._title(docs[0].page_content, Path(name))
         self.titles[name] = title
+        self.texts[name] = "\n\n".join(doc.page_content for doc in docs)
         lab = lab_number(title)
         chunks = self.splitter.split_documents(docs)
         for number, chunk in enumerate(chunks, start=1):
@@ -303,12 +351,17 @@ class KnowledgeBase:
         if allowed:
             rankings.append(allowed[:depth])
         numbers = set(_lab_number_re.findall(query))
+        foreign: set[int] = set()
         if numbers:
             wanted = {
                 i
                 for i in candidates
                 if any(same_lab(n, self.chunks[i].metadata.get("lab", "")) for n in numbers)
             }
+            if wanted:
+                foreign = {i for i in candidates if self.chunks[i].metadata.get("lab")} - wanted
+                bm25_rank = [i for i in bm25_rank if i not in foreign]
+                rankings[0] = bm25_rank[:depth]
             rankings.append([i for i in bm25_rank if i in wanted] + sorted(wanted - set(bm25_rank)))
         elif prefer:
             chosen = [i for i in candidates if self.chunks[i].metadata["source"] in prefer]
@@ -318,7 +371,7 @@ class KnowledgeBase:
             keep = (lambda doc: doc.metadata["source"] in only) if allowed else None
             try:
                 found = self.vector_store.similarity_search(query, k=depth, filter=keep)
-                rankings.append([int(doc.id) for doc in found])
+                rankings.append([int(doc.id) for doc in found if int(doc.id) not in foreign])
             except Exception as exc:
                 self.vector_error = str(exc)
         fused: dict[int, float] = {}
@@ -329,9 +382,13 @@ class KnowledgeBase:
         return [self.chunks[i] for i in best]
 
     def as_retriever(
-        self, k: int = 4, only: set[str] | None = None, prefer: set[str] | None = None
+        self,
+        k: int = 4,
+        only: set[str] | None = None,
+        prefer: set[str] | None = None,
+        extra: list[Document] | None = None,
     ) -> HybridRetriever:
-        return HybridRetriever(kb=self, k=k, only=only, prefer=prefer)
+        return HybridRetriever(kb=self, k=k, only=only, prefer=prefer, extra=extra or [])
 
     def describe(self) -> str:
         if not self.chunks:

@@ -31,10 +31,24 @@ from .data_analysis import (
     table_text,
 )
 from .graphics import draw_flowchart, plot_fit
-from .knowledge import KnowledgeBase, format_docs, load_file
+from .knowledge import (
+    KnowledgeBase,
+    format_docs,
+    lab_number,
+    load_file,
+    overview,
+    same_lab,
+)
 from .llm import create_chat_model, create_embeddings
 from .memory import ConversationMemory, plan_context
-from .report import compose_report, figure_catalog, render_report_docx, report_inserts
+from .report import (
+    FIGURE_REF,
+    IMAGE as IMAGE_LINK,
+    compose_report,
+    figure_catalog,
+    render_report_docx,
+    report_inserts,
+)
 from .speech import NO_SPEECH, SpeechError, synthesize, transcribe
 from .video import clock, contact_sheet, extract_audio, is_video, is_voice, key_frames
 
@@ -73,6 +87,15 @@ MODES = {
     "chat": "Свободный диалог",
 }
 STOP_WORDS = {"стоп", "хватит", "закончить", "завершить", "stop"}
+OVERVIEW = re.compile(
+    r"о\s+ч[её]м|что\s+(?:нужно|надо|необходимо|требуется|предстоит)\s+(?:делать|сделать|выполн)"
+    r"|что\s+делать|по\s+шагам|пошагов|порядок\s+(?:выполнения|работы)|ход\s+работы"
+    r"|как\s+(?:выполн|провод)|план\s+работы"
+    r"|(?:расскажи|опиши|объясни)\s+(?:мне\s+)?(?:о|про)?\s*(?:эт\w+\s+)?(?:лаб|работ)",
+    re.IGNORECASE,
+)
+LOOP_LINE = 25
+MAX_FIGURES = 4
 LAB_QUERIES = (
     "цели работы",
     "уравнение зависимость формула {hints}",
@@ -193,6 +216,24 @@ def open_image(path: Path, out_dir: Path) -> str:
     with Image.open(path) as image:
         image.verify()
     return str(path)
+
+
+def cut_loop(text: str, repeats: int = 3) -> tuple[str, bool]:
+    lines = text.split("\n")
+    seen: dict[str, list[int]] = {}
+    for index, line in enumerate(lines):
+        key = line.strip()
+        if len(key) < LOOP_LINE or key.startswith("|"):
+            continue
+        seen.setdefault(key, []).append(index)
+        if len(seen[key]) >= repeats:
+            kept = lines[: seen[key][1]]
+            while kept and (
+                not kept[-1].strip() or kept[-1].strip() in {line.strip() for line in kept[:-1]}
+            ):
+                kept.pop()
+            return "\n".join(kept).rstrip(), True
+    return text, False
 
 
 def source_list(docs: list[Document]) -> list[str]:
@@ -513,22 +554,82 @@ class LabAssistant:
             "files": session.files_text(),
         }
 
+    def overview_lab(self, question: str, options: Options) -> str:
+        if not OVERVIEW.search(question):
+            return ""
+        number, titles = lab_number(question), self.lab_titles()
+        if number:
+            return next((title for title in titles if same_lab(number, lab_number(title))), "")
+        return options.lab if options.lab in titles else ""
+
+    def lab_overview(self, session: Session, options: Options, title: str) -> list[Document]:
+        plan = session.context_plan or self.apply_context(session, options)
+        used = session.memory.stats()["tokens"]
+        free = options.num_ctx - plan["system"] - plan["answer"] - used - 300
+        budget = max(3000, min(12000, 3 * (free - 2 * self.settings.chunk_size // 3)))
+        for name, lab in self.kb.titles.items():
+            text = self.kb.texts.get(name, "")
+            if lab == title and text:
+                metadata = {"source": name, "title": title, "chunk": "основные разделы"}
+                content = f"{title}\n\n{overview(text, budget)}"
+                return [Document(page_content=content, metadata=metadata)]
+        return []
+
+    def answer_figures(self, text: str, docs: list[Document], title: str = "") -> list[str]:
+        names = [name for name, lab in self.kb.titles.items() if title and lab == title]
+        names += [doc.metadata.get("source", "") for doc in docs]
+        catalogs = (figure_catalog(self.kb.texts.get(name, "")) for name in names)
+        catalog = next((found for found in catalogs if found), {})
+        shown = {self.find_image(m.group(2) or m.group(3)) for m in IMAGE_LINK.finditer(text)}
+        lines = []
+        for match in FIGURE_REF.finditer(text):
+            number = int(match.group(3))
+            if number not in catalog or len(lines) >= MAX_FIGURES:
+                continue
+            name, ref = catalog[number]
+            path = self.find_image(ref)
+            if path is not None and path not in shown:
+                shown.add(path)
+                lines.append(f"![Рис. {number}. {name}]({ref})")
+        return lines
+
     def _handle_manual(self, session, question, options, reply, images):
-        retriever = self.kb.as_retriever(options.top_k, **self._focus(session, question))
+        title = self.overview_lab(question, options)
+        extra = self.lab_overview(session, options, title) if title else []
+        retriever = self.kb.as_retriever(
+            2 if extra else options.top_k, extra=extra, **self._focus(session, question)
+        )
         chain = chains.build_rag_chain(self.llm(options), retriever)
+        docs = []
         for chunk in chain.stream({**self._context(session), "question": question}):
             if "docs" in chunk:
-                reply.sources = source_list(chunk["docs"])
+                docs = chunk["docs"]
+                reply.sources = source_list(docs)
             if "answer" in chunk:
-                reply.text += chunk["answer"]
+                if self._grow(reply, chunk["answer"]):
+                    break
                 yield reply
+        figures = self.answer_figures(reply.text, docs, title)
+        if figures:
+            reply.text = "\n\n".join([reply.text.rstrip(), *figures])
+        yield reply
+
+    @staticmethod
+    def _grow(reply: Reply, token: str) -> bool:
+        reply.text += token
+        if "\n" not in token:
+            return False
+        reply.text, looped = cut_loop(reply.text)
+        return looped
 
     def _handle_chat(self, session, question, options, reply, images):
         for token in chains.build_chat_chain(self.llm(options)).stream(
             {**self._context(session), "question": question}
         ):
-            reply.text += token
+            if self._grow(reply, token):
+                break
             yield reply
+        yield reply
 
     def _handle_vision(self, session, question, options, reply, images):
         images = images or session.images
@@ -545,8 +646,10 @@ class LabAssistant:
         ]
         inputs = {**self._context(session), "request": [HumanMessage(content=content)]}
         for token in chains.build_vision_chain(self.llm(options, vision=True)).stream(inputs):
-            reply.text += token
+            if self._grow(reply, token):
+                break
             yield reply
+        yield reply
 
     def _handle_research(self, session, question, options, reply, images):
         agent = build_research_agent(

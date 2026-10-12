@@ -6,6 +6,7 @@ from PIL import Image
 
 from labmentor.config import Settings
 from labmentor.ui import (
+    CHAT_CSS,
     ICONS,
     LOADING_CSS,
     STATIC,
@@ -30,7 +31,8 @@ def test_every_main_block_has_an_icon_from_the_set():
 
 def test_launch_options_add_icons_and_favicon(tmp_path):
     options = launch_options(Settings(storage_dir=tmp_path))
-    assert options["css"] == interface_css() == icon_css() + "\n" + LOADING_CSS
+    assert options["css"] == interface_css() == "\n".join([icon_css(), LOADING_CSS, CHAT_CSS])
+    assert "--lm-chat-height" in options["js"] and "--lm-chat-height" in CHAT_CSS
     assert "@keyframes lm-spin" in LOADING_CSS and "#btn-explain:disabled::before" in LOADING_CSS
     with Image.open(options["favicon_path"]) as favicon:
         assert favicon.size == (64, 64) and favicon.mode == "RGBA"

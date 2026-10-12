@@ -37,6 +37,7 @@ def create_chat_model(
             temperature=temperature,
             num_ctx=num_ctx or settings.num_ctx,
             num_predict=settings.max_answer_tokens,
+            repeat_last_n=256,
         )
     if provider == "openai":
         if not settings.openai_api_key:
