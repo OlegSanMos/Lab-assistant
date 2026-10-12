@@ -228,7 +228,14 @@ def test_data_processing_tab(page):
     visible(page, "Результат: R_Ом = 101.34 ± 0.32, P = 0.95")
 
 
-def test_conclusions_for_the_lab_chosen_on_data_tab(page):
+def test_conclusions_for_the_lab_chosen_on_data_tab(page, monkeypatch):
+    explain_results = LabAssistant.explain_results
+
+    def slow(self, session, options):
+        time.sleep(2)
+        return explain_results(self, session, options)
+
+    monkeypatch.setattr(LabAssistant, "explain_results", slow)
     page.get_by_role("tab", name="Обработка данных").click()
     page.locator('input[type=file][accept=".csv, .tsv, .xlsx"]').set_input_files(
         str(SAMPLES / "ohm_law.csv")
@@ -245,7 +252,19 @@ def test_conclusions_for_the_lab_chosen_on_data_tab(page):
     first = choice.input_value()
     sync_api.expect(page.get_by_label(LAB_LABEL)).to_have_value(first)
     explain.click()
+    visible(page, "Готовлю выводы по лабораторной работе 1:")
+    button = page.locator("#btn-explain")
+    sync_api.expect(button).to_be_disabled()
+    sync_api.expect(button).to_have_text("Выводы готовятся...")
+    spinning = page.evaluate(
+        """() => [document.querySelector("#btn-explain"), document.querySelector(".lm-loading")]
+            .map(element => getComputedStyle(element, "::before").animationName)"""
+    )
+    assert spinning == ["lm-spin", "lm-spin"]
     visible(page, f"Выводы по работе «{first}»")
+    sync_api.expect(button).to_be_enabled()
+    sync_api.expect(button).to_have_text("Сформулировать выводы (LLM)")
+    assert page.locator(".lm-loading").count() == 0
     visible(page, "Зависимость подтверждена")
     page.get_by_label(LAB_LABEL).click()
     page.get_by_role("option", name="Лабораторная работа № 2.", exact=False).first.click()

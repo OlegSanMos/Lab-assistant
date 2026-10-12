@@ -5,7 +5,15 @@ from xml.etree import ElementTree
 from PIL import Image
 
 from labmentor.config import Settings
-from labmentor.ui import ICONS, STATIC, icon_css, launch_options
+from labmentor.ui import (
+    ICONS,
+    LOADING_CSS,
+    STATIC,
+    icon_css,
+    interface_css,
+    launch_options,
+    loading_text,
+)
 
 
 def test_every_main_block_has_an_icon_from_the_set():
@@ -22,6 +30,13 @@ def test_every_main_block_has_an_icon_from_the_set():
 
 def test_launch_options_add_icons_and_favicon(tmp_path):
     options = launch_options(Settings(storage_dir=tmp_path))
-    assert options["css"] == icon_css()
+    assert options["css"] == interface_css() == icon_css() + "\n" + LOADING_CSS
+    assert "@keyframes lm-spin" in LOADING_CSS and "#btn-explain:disabled::before" in LOADING_CSS
     with Image.open(options["favicon_path"]) as favicon:
         assert favicon.size == (64, 64) and favicon.mode == "RGBA"
+
+
+def test_loading_message_names_the_lab():
+    text = loading_text("Лабораторная работа 1.4. Изучение КМОП-схем")
+    assert text.startswith('<div class="lm-loading">Готовлю выводы по лабораторной работе 1.4:')
+    assert loading_text("Мои заметки").startswith('<div class="lm-loading">Готовлю выводы:')

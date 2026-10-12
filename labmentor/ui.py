@@ -21,7 +21,7 @@ from .assistant import (
 from .config import DEFAULT_MODELS, PROJECT_DIR, Settings
 from .data_analysis import add_column, parse_column_spec
 from .formulas import LATEX_DELIMITERS, prettify_math
-from .knowledge import DOC_EXTENSIONS
+from .knowledge import DOC_EXTENSIONS, lab_number
 from .llm import PROVIDERS
 from .report import IMAGE
 from .speech import (
@@ -62,6 +62,19 @@ ICON_STYLE = (
     "-webkit-mask-position:center;mask-position:center;-webkit-mask-size:contain;"
     "mask-size:contain;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat"
 )
+LOADING_CSS = (
+    "@keyframes lm-spin{to{transform:rotate(360deg)}}"
+    ".lm-loading{display:flex;align-items:center;gap:.8em;padding:.9em 1.1em;"
+    "border-radius:var(--radius-lg);background:var(--color-accent-soft);"
+    "color:var(--body-text-color)}"
+    ".lm-loading::before,#btn-explain:disabled::before{content:'';flex-shrink:0;"
+    "border-radius:50%;border:.18em solid currentColor;border-right-color:transparent;"
+    "background:none;-webkit-mask-image:none;mask-image:none;"
+    "animation:lm-spin .8s linear infinite}"
+    ".lm-loading::before{width:1.4em;height:1.4em;color:var(--color-accent)}"
+)
+EXPLAIN = "Сформулировать выводы (LLM)"
+EXPLAIN_WAIT = "Выводы готовятся..."
 TITLE = "ЛабМентор"
 LAB_LABEL = "Текущая лабораторная работа (для выводов, отчета, защиты и схем)"
 SUBTITLE = "виртуальный ассистент лабораторного практикума по инженерным дисциплинам"
@@ -131,6 +144,19 @@ def icon_css() -> str:
         image = f'url("data:image/svg+xml;base64,{data}")'
         rules.append(f"{selector}::before{{-webkit-mask-image:{image};mask-image:{image}}}")
     return "\n".join(rules)
+
+
+def interface_css() -> str:
+    return icon_css() + "\n" + LOADING_CSS
+
+
+def loading_text(title: str) -> str:
+    number = lab_number(title)
+    work = f" по лабораторной работе {number}" if number else ""
+    return (
+        f'<div class="lm-loading">Готовлю выводы{work}: модель изучает методичку и '
+        "результаты обработки. Обычно это занимает от нескольких секунд до минуты.</div>"
+    )
 
 
 def fresh_audio(path: str | None):
@@ -378,9 +404,7 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
                             label="Лабораторная работа для выводов",
                             info="Выводы рассчитываются по методичке этой работы",
                         )
-                        explain_btn = gr.Button(
-                            "Сформулировать выводы (LLM)", elem_id="btn-explain"
-                        )
+                        explain_btn = gr.Button(EXPLAIN, elem_id="btn-explain")
                     with gr.Column(scale=2):
                         table_view = gr.Dataframe(label="Данные", interactive=False, max_height=260)
                         plot = gr.Image(label="График", type="filepath", height=380)
@@ -644,15 +668,25 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
         def on_explain(sess, title, *values):
             if not title:
                 raise gr.Error("Выберите лабораторную работу, по которой нужны выводы")
+            if not sess.data.last_results:
+                raise gr.Error("Сначала выполните обработку данных")
             options = make_options(*values)
             options.lab = title
+            yield loading_text(title), gr.Button(EXPLAIN_WAIT, interactive=False)
             try:
                 text = assistant.explain_results(sess, options)
+                result = f"#### Выводы по работе «{title}»\n\n{prettify_math(text)}"
             except Exception as exc:
-                raise gr.Error(str(exc)) from exc
-            return f"#### Выводы по работе «{title}»\n\n{prettify_math(text)}"
+                gr.Warning(f"Не удалось сформулировать выводы: {exc}")
+                result = f"Не удалось сформулировать выводы: {exc}"
+            yield result, gr.Button(EXPLAIN, interactive=True)
 
-        explain_btn.click(on_explain, [session, data_lab, *option_inputs], insight)
+        explain_btn.click(
+            on_explain,
+            [session, data_lab, *option_inputs],
+            [insight, explain_btn],
+            show_progress="hidden",
+        )
 
         def on_report(sess, notes_text, images, captions, *values):
             options = make_options(*values)
@@ -678,7 +712,7 @@ def launch_options(settings: Settings) -> dict:
     font = [gr.themes.LocalFont("IBM Plex Sans"), "Arial", "sans-serif"]
     return {
         "theme": gr.themes.Soft(primary_hue="blue", secondary_hue="sky", font=font),
-        "css": icon_css(),
+        "css": interface_css(),
         "favicon_path": str(STATIC / "favicon.png"),
         "allowed_paths": [
             str(settings.output_dir),

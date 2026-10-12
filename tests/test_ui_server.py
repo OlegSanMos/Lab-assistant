@@ -170,7 +170,10 @@ def test_data_tab_endpoints(client, tmp_path):
     assert "R² = 0.9999" in results and "Результат: R_Ом = 101.34 ± 0.32, P = 0.95" in results
     with pytest.raises(Exception, match="Выберите лабораторную работу, по которой нужны выводы"):
         client.predict(None, *OPTIONS, api_name="/on_explain")
-    insight = client.predict(LAB_1, *OPTIONS, api_name="/on_explain")
+    job = client.submit(LAB_1, *OPTIONS, api_name="/on_explain")
+    job.result()
+    waiting, insight = job.outputs()
+    assert waiting.startswith('<div class="lm-loading">Готовлю выводы по лабораторной работе 1:')
     assert insight.startswith(f"#### Выводы по работе «{LAB_1}»")
     assert "R = 1/k = 101,5 Ом" in insight
     photo = tmp_path / "setup.png"
@@ -191,6 +194,22 @@ def test_data_tab_endpoints(client, tmp_path):
         r.status_code == 200 and r.content[:4] == b"\x89PNG" for r in pictures
     )
     assert len(Document(report).inline_shapes) == 2
+
+
+def test_conclusions_wait_for_data_and_survive_model_errors(client, monkeypatch):
+    fresh = Client(client.src, verbose=False)
+    with pytest.raises(Exception, match="Сначала выполните обработку данных"):
+        fresh.predict(LAB_1, *OPTIONS, api_name="/on_explain")
+
+    def unavailable(self, session, options):
+        raise RuntimeError("модель недоступна")
+
+    fresh.predict(handle_file(str(SAMPLES / "ohm_law.csv")), api_name="/on_table")
+    fresh.predict("U_В", "I_мА", 1, 0.95, None, api_name="/on_analyze")
+    monkeypatch.setattr(LabAssistant, "explain_results", unavailable)
+    job = fresh.submit(LAB_1, *OPTIONS, api_name="/on_explain")
+    job.result()
+    assert job.outputs()[-1] == "Не удалось сформулировать выводы: модель недоступна"
 
 
 def test_context_window_controls(client):
