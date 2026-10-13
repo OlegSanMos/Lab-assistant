@@ -56,6 +56,8 @@ ICONS = {
     "#btn-analyze": "calculator",
     "#btn-explain": "sparkles",
     "#btn-report": "file-pen",
+    "#btn-focus-on": "maximize-2",
+    "#btn-focus-off": "minimize-2",
 }
 ICON_STYLE = (
     "content:'';display:inline-block;flex-shrink:0;width:1.15em;height:1.15em;"
@@ -79,20 +81,62 @@ CHAT_CSS = (
     "#chat{height:var(--lm-chat-height," + CHAT_HEIGHT + ") !important}"
     "#chat .md img{max-height:420px;width:auto;max-width:100%;object-fit:contain}"
 )
+FOCUS_CSS = (
+    ".tab-wrapper{padding-right:160px;background:linear-gradient(var(--border-color-primary),"
+    "var(--border-color-primary)) no-repeat right 0 bottom calc(var(--size-2)/2)/160px 1px}"
+    "#btn-focus-on,#btn-focus-off{position:absolute;right:0;z-index:5;width:auto;"
+    "max-width:156px;white-space:nowrap;overflow:hidden}"
+    "#btn-focus-on{top:-48px}#btn-focus-off{top:-36px}"
+    "body:not(.lm-focus) #btn-focus-off,body.lm-focus #btn-focus-on{display:none}"
+    "body.lm-focus #app-title,body.lm-focus .tab-wrapper,body.lm-focus footer,"
+    "body.lm-focus #speech-status{display:none}"
+    "body.lm-focus #tab-dialog{padding-top:40px}"
+    "@media (max-width:1199px){.tab-wrapper{padding-right:52px;background-size:52px 1px}"
+    "#btn-focus-on{font-size:0;gap:0;min-width:0;padding:5px 10px}"
+    "#btn-focus-on::before{width:16px;height:16px;margin:0}}"
+)
 FIT_CHAT = """
 () => {
   const fit = () => {
     const chat = document.querySelector("#chat");
-    const status = document.querySelector("#speech-status");
-    if (!chat || !status || !chat.offsetParent) return;
+    if (!chat || !chat.offsetParent) return;
     const box = chat.getBoundingClientRect();
-    const below = status.getBoundingClientRect().bottom - box.bottom;
-    const height = Math.max(300, window.innerHeight - box.top - window.scrollY - below - 56);
-    document.documentElement.style.setProperty("--lm-chat-height", height + "px");
+    let bottom = box.bottom;
+    for (const item of chat.parentElement.children) {
+      const rect = item.getBoundingClientRect();
+      if (rect.height > 0) bottom = Math.max(bottom, rect.bottom);
+    }
+    const footer = document.querySelector("footer");
+    const reserve = footer && footer.offsetParent ? 56 : 24;
+    const free = window.innerHeight - box.top - window.scrollY - (bottom - box.bottom) - reserve;
+    document.documentElement.style.setProperty("--lm-chat-height", Math.max(300, free) + "px");
   };
+  window.lmFitChat = fit;
   new ResizeObserver(fit).observe(document.body);
   window.addEventListener("resize", fit);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("lm-focus")) {
+      document.querySelector("#btn-focus-off").click();
+    }
+  });
   setTimeout(fit, 300);
+}
+"""
+TOGGLE_FOCUS = """
+() => {
+  const body = document.body;
+  const on = !body.classList.contains("lm-focus");
+  const sidebar = document.querySelector(".sidebar");
+  const toggle = sidebar && sidebar.querySelector(".toggle-button");
+  const open = Boolean(sidebar && sidebar.classList.contains("open"));
+  if (on) {
+    body.dataset.lmSidebar = open ? "open" : "";
+    if (open && toggle) toggle.click();
+  } else if (body.dataset.lmSidebar === "open" && !open && toggle) {
+    toggle.click();
+  }
+  body.classList.toggle("lm-focus", on);
+  for (const delay of [50, 400]) setTimeout(() => window.lmFitChat && window.lmFitChat(), delay);
 }
 """
 EXPLAIN = "Сформулировать выводы (LLM)"
@@ -169,7 +213,7 @@ def icon_css() -> str:
 
 
 def interface_css() -> str:
-    return "\n".join([icon_css(), LOADING_CSS, CHAT_CSS])
+    return "\n".join([icon_css(), LOADING_CSS, CHAT_CSS, FOCUS_CSS])
 
 
 def loading_text(title: str) -> str:
@@ -362,6 +406,8 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
         gr.Markdown(f"## {TITLE}: {SUBTITLE}", elem_id="app-title")
         with gr.Tabs():
             with gr.Tab("Диалог", elem_id="tab-dialog"):
+                focus_on = gr.Button("Развернуть диалог", size="sm", elem_id="btn-focus-on")
+                focus_off = gr.Button("Обычный вид", size="sm", elem_id="btn-focus-off")
                 chatbot = gr.Chatbot(
                     height=CHAT_HEIGHT,
                     min_height=300,
@@ -607,6 +653,8 @@ def build_ui(assistant: LabAssistant) -> gr.Blocks:
             return {"text": evt.value["text"], "files": []}
 
         chatbot.example_select(on_example, None, chat_input)
+        focus_on.click(None, js=TOGGLE_FOCUS)
+        focus_off.click(None, js=TOGGLE_FOCUS)
 
         def on_clear(sess):
             sess.memory.clear()

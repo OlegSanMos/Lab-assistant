@@ -135,6 +135,61 @@ def test_dialog_fills_the_window(page):
         assert 300 <= found["sidebar"] <= 420
 
 
+def test_dialog_expands_to_full_screen(page):
+    state = """() => {
+        const chat = document.querySelector("#chat").getBoundingClientRect();
+        const shown = (selector) => Boolean(document.querySelector(selector).offsetParent);
+        return {
+            focus: document.body.classList.contains("lm-focus"),
+            sidebar: document.querySelector(".sidebar").classList.contains("open"),
+            menus: [shown("#app-title"), shown(".tab-wrapper")],
+            height: Math.round(chat.height),
+            width: Math.round(chat.width),
+            fits: document.documentElement.scrollHeight <= window.innerHeight + 2,
+        };
+    }"""
+    grown = """normal => {
+        const chat = document.querySelector("#chat").getBoundingClientRect();
+        return chat.width > normal.width + 250 && chat.height > normal.height + 100;
+    }"""
+    restored = """normal => {
+        const chat = document.querySelector("#chat").getBoundingClientRect();
+        return Math.round(chat.width) === normal.width && Math.round(chat.height) === normal.height;
+    }"""
+    page.wait_for_function(
+        "() => document.documentElement.scrollHeight <= window.innerHeight + 2", timeout=10_000
+    )
+    normal = page.evaluate(state)
+    assert normal["sidebar"] and normal["menus"] == [True, True] and not normal["focus"]
+    expand = page.get_by_role("button", name="Развернуть диалог")
+    collapse = page.get_by_role("button", name="Обычный вид")
+    sync_api.expect(collapse).to_be_hidden()
+    for close in (collapse.click, lambda: page.keyboard.press("Escape")):
+        expand.click()
+        page.wait_for_function(grown, arg=normal, timeout=10_000)
+        full = page.evaluate(state)
+        assert full["focus"] and not full["sidebar"] and full["menus"] == [False, False]
+        assert full["fits"]
+        sync_api.expect(expand).to_be_hidden()
+        sync_api.expect(page.get_by_placeholder(INPUT)).to_be_visible()
+        close()
+        page.wait_for_function(restored, arg=normal, timeout=10_000)
+        assert page.evaluate(state) == normal
+        sync_api.expect(collapse).to_be_hidden()
+    apart = """() => {
+        const button = document.querySelector("#btn-focus-on").getBoundingClientRect();
+        const tabs = ".tab-container:not(.visually-hidden) button, .overflow-menu button";
+        return [...document.querySelectorAll(tabs)]
+            .filter(tab => tab.offsetParent)
+            .map(tab => tab.getBoundingClientRect())
+            .every(tab => tab.right <= button.left || tab.left >= button.right);
+    }"""
+    for width in (1024, 820, 1440):
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.wait_for_function(apart, timeout=10_000)
+        sync_api.expect(expand).to_be_visible()
+
+
 def test_main_blocks_have_icons(page):
     selectors = [
         "#app-title h2",
@@ -146,6 +201,7 @@ def test_main_blocks_have_icons(page):
         "#tab-report-button",
         "#tab-about-button",
         "#btn-clear",
+        "#btn-focus-on",
     ]
     icons = page.evaluate(
         """selectors => selectors.map(selector => {
