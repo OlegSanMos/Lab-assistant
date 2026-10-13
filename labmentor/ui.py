@@ -95,6 +95,7 @@ FOCUS_CSS = (
     "#btn-focus-on{font-size:0;gap:0;min-width:0;padding:5px 10px}"
     "#btn-focus-on::before{width:16px;height:16px;margin:0}}"
 )
+VOICE_CSS = "#voice-input .mic-select{max-width:100%}"
 FIT_CHAT = """
 () => {
   const fit = () => {
@@ -213,7 +214,7 @@ def icon_css() -> str:
 
 
 def interface_css() -> str:
-    return "\n".join([icon_css(), LOADING_CSS, CHAT_CSS, FOCUS_CSS])
+    return "\n".join([icon_css(), LOADING_CSS, CHAT_CSS, FOCUS_CSS, VOICE_CSS])
 
 
 def loading_text(title: str) -> str:

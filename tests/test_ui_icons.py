@@ -12,6 +12,7 @@ from labmentor.ui import (
     LOADING_CSS,
     STATIC,
     TOGGLE_FOCUS,
+    VOICE_CSS,
     icon_css,
     interface_css,
     launch_options,
@@ -33,9 +34,10 @@ def test_every_main_block_has_an_icon_from_the_set():
 
 def test_launch_options_add_icons_and_favicon(tmp_path):
     options = launch_options(Settings(storage_dir=tmp_path))
-    parts = [icon_css(), LOADING_CSS, CHAT_CSS, FOCUS_CSS]
+    parts = [icon_css(), LOADING_CSS, CHAT_CSS, FOCUS_CSS, VOICE_CSS]
     assert options["css"] == interface_css() == "\n".join(parts)
     assert "body.lm-focus .tab-wrapper" in FOCUS_CSS and "lm-focus" in TOGGLE_FOCUS
+    assert VOICE_CSS == "#voice-input .mic-select{max-width:100%}"
     assert "--lm-chat-height" in options["js"] and "--lm-chat-height" in CHAT_CSS
     assert "@keyframes lm-spin" in LOADING_CSS and "#btn-explain:disabled::before" in LOADING_CSS
     with Image.open(options["favicon_path"]) as favicon:

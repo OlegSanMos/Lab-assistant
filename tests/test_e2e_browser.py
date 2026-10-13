@@ -384,6 +384,33 @@ def test_voice_question_by_microphone(page, monkeypatch, tmp_path):
     sync_api.expect(recorder.get_by_role("button", name="Record").first).to_be_visible()
 
 
+def test_microphone_note_fits_its_frame(browser, app_url):
+    context = browser.new_context(viewport={"width": 1440, "height": 1000}, locale="ru-RU")
+    context.add_init_script("navigator.mediaDevices.enumerateDevices = async () => [];")
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(app_url, wait_until="domcontentloaded")
+    select = page.locator("#voice-input select")
+    sync_api.expect(select).to_have_text("Микрофон не найден", timeout=30_000)
+    fits = """() => {
+        const select = document.querySelector("#voice-input select");
+        const style = getComputedStyle(select);
+        const canvas = document.createElement("canvas").getContext("2d");
+        canvas.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        const text = canvas.measureText(select.options[select.selectedIndex].text).width;
+        const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+        const free = select.clientWidth - padding;
+        const box = document.querySelector("#voice-input").getBoundingClientRect();
+        return text <= free && select.getBoundingClientRect().right <= box.right;
+    }"""
+    for width in (1440, 1024, 820):
+        page.set_viewport_size({"width": width, "height": 1000})
+        assert page.evaluate(fits), f"надпись не помещается при ширине окна {width}"
+    context.close()
+    assert errors == [], f"Ошибки JavaScript на странице: {errors}"
+
+
 def ask_by_voice(page):
     recorder = page.locator("#voice-input")
     record = recorder.get_by_role("button", name="Record").first
